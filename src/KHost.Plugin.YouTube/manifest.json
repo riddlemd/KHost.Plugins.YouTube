@@ -1,0 +1,14 @@
+{
+  "$schema": "../../../KHost/src/KHost.Plugins.Sdk/manifest.schema.json",
+  "id": "88f42c92-f15a-443c-afa0-0983f05fdbb4",
+  "name": "YouTube Search",
+  "version": "1.0.0",
+  "author": "KHost",
+  "description": "Search YouTube for karaoke videos.",
+  "entryAssembly": "KHost.Plugin.YouTube.dll",
+  "apiVersion": 1,
+  "settings": [
+    { "key": "apiKey", "type": "string", "label": "YouTube Data API Key", "secret": true },
+    { "key": "maxResults", "type": "int", "label": "Max Results", "default": 10 }
+  ]
+}
