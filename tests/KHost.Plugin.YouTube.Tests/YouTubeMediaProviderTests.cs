@@ -59,9 +59,20 @@ public class YouTubeMediaProviderTests
         var results = await _provider.SearchAsync("africa karaoke");
 
         Assert.Equal(2, results.Count);
-        Assert.Equal("Africa 'Karaoke' & Lyrics", results[0].DisplayName);
+        Assert.Equal("Africa 'Karaoke' & Lyrics", results[0].Title);
         Assert.Equal("abc123", results[0].ForeignKey);
         Assert.Equal("YouTube", results[0].Source);
+        Assert.Equal("Karaoke Channel", results[0].Notes);
+    }
+
+    [Fact]
+    public async Task SearchAsync_LeavesArtistEmpty_AndKeepsTheChannelAsANote()
+    {
+        var results = await _provider.SearchAsync("africa karaoke");
+
+        // The channel uploaded the video, it did not perform the song, so it must not reach the
+        // artist column the console now renders beside the title.
+        Assert.Equal(string.Empty, results[0].Artist);
         Assert.Equal("Karaoke Channel", results[0].Notes);
     }
 

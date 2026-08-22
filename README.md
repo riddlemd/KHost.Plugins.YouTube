@@ -1,7 +1,10 @@
 # KHost.Plugin.YouTube
 
-YouTube media search plugin for [KHost](../KHost). Adds a YouTube Data API v3 search
-provider to the media search panel, with an "Open on YouTube" result action.
+YouTube media provider for [KHost](../KHost). Adds a YouTube Data API v3 search provider
+to the console's Song Search panel, with an "Open on YouTube" result action.
+
+Results carry the video title as `Title` and leave `Artist` empty — a video title is one
+string, and the channel is the uploader rather than the performer, so it stays in `Notes`.
 
 ## Building
 

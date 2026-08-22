@@ -69,9 +69,11 @@ public class YouTubeMediaProvider : IMediaProvider, IDisposable
 
         var durations = await ReadDurationsAsync(videos.Select(v => v.Id), apiKey);
 
+        // Artist stays empty on purpose: a video title is one string no parse splits reliably, and
+        // channelTitle is the uploader — "Sing King" is not who performed the song.
         return [.. videos.Select(video => new MediaSearchEntity
         {
-            DisplayName = video.Title,
+            Title = video.Title,
             SourceDisplayName = DisplayName,
             Source = SourceName,
             ForeignKey = video.Id,
