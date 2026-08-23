@@ -9,21 +9,12 @@ public delegate Task<string> YtDlpRunner(IReadOnlyList<string> arguments, Cancel
 public sealed class YtDlp
 {
     private readonly YtDlpResolver _resolver;
-    private readonly bool _autoUpdate;
 
-    private int _updateStarted;
-
-    public YtDlp(YtDlpResolver resolver, bool autoUpdate = true)
-    {
-        _resolver = resolver;
-        _autoUpdate = autoUpdate;
-    }
+    public YtDlp(YtDlpResolver resolver) => _resolver = resolver;
 
     public async Task<string> RunAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken = default)
     {
         var executable = await _resolver.ResolveAsync(cancellationToken);
-
-        StartUpdateOnce(executable);
 
         return await RunProcessAsync(executable, arguments, cancellationToken);
     }
@@ -60,33 +51,5 @@ public sealed class YtDlp
                 $"yt-dlp exited with {process.ExitCode}: {standardError.Result.Trim()}");
 
         return standardOutput.Result;
-    }
-
-    /// <summary>
-    /// Refreshes our own copy once per run, in the background. YouTube breaks extraction every few
-    /// weeks and yt-dlp ships the fix within days, so a host who never thinks about it still gets
-    /// one — but a search must not wait on a network round trip to start.
-    /// </summary>
-    private void StartUpdateOnce(string executable)
-    {
-        if (!_autoUpdate) return;
-
-        // Only the copy we downloaded. A packaged install refuses -U and says to use its package
-        // manager, so running it there is noise at best.
-        if (!_resolver.OwnsCopyAt(executable)) return;
-
-        if (Interlocked.Exchange(ref _updateStarted, 1) == 1) return;
-
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await RunProcessAsync(executable, ["-U"], CancellationToken.None);
-            }
-            catch
-            {
-                // An update that cannot run leaves the version we already have, which still works.
-            }
-        });
     }
 }

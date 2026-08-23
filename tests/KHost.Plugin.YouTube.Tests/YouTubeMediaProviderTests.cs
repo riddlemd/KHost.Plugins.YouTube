@@ -11,7 +11,7 @@ public class YouTubeMediaProviderTests
         {"id":"def456","title":"Wonderwall Karaoke","channel":"Sing King","duration":null}
         """;
 
-    private readonly IPlugin _plugin = Substitute.For<IPlugin>();
+    private readonly IPluginContext _plugin = Substitute.For<IPluginContext>();
     private readonly FakeRunner _runner = new() { Output = SearchOutput };
     private readonly YouTubeMediaProvider _provider;
 
@@ -73,7 +73,7 @@ public class YouTubeMediaProviderTests
 
         var arguments = _runner.Calls.Single();
 
-        Assert.Equal("ytsearch10:rick & morty", arguments[0]);
+        Assert.Equal("ytsearch10:rick & morty Karaoke", arguments[0]);
         Assert.Contains("--dump-json", arguments);
 
         // Without it yt-dlp resolves every hit in turn, which is a page load per row.
@@ -87,7 +87,17 @@ public class YouTubeMediaProviderTests
 
         // One argument, verbatim: joining these into a command line is how a title with a quote
         // turns into extra arguments.
-        Assert.Equal("ytsearch10:don't stop \"believin\"", _runner.Calls.Single()[0]);
+        Assert.Equal("ytsearch10:don't stop \"believin\" Karaoke", _runner.Calls.Single()[0]);
+    }
+
+    [Fact]
+    public async Task SearchAsync_AsksYouTubeForTheKaraokeCut()
+    {
+        await _provider.SearchAsync("wonderwall");
+
+        // A host wants the backing track, not the record. Without the word YouTube answers with the
+        // original every time and the useful results are pages down.
+        Assert.Equal("ytsearch10:wonderwall Karaoke", _runner.Calls.Single()[0]);
     }
 
     [Fact]
@@ -95,7 +105,7 @@ public class YouTubeMediaProviderTests
     {
         await _provider.SearchAsync("africa", pageSize: 5);
 
-        Assert.Equal("ytsearch5:africa", _runner.Calls.Single()[0]);
+        Assert.Equal("ytsearch5:africa Karaoke", _runner.Calls.Single()[0]);
     }
 
     [Fact]
@@ -103,7 +113,7 @@ public class YouTubeMediaProviderTests
     {
         await _provider.SearchAsync("africa", pageSize: 5000);
 
-        Assert.Equal("ytsearch50:africa", _runner.Calls.Single()[0]);
+        Assert.Equal("ytsearch50:africa Karaoke", _runner.Calls.Single()[0]);
     }
 
     [Fact]

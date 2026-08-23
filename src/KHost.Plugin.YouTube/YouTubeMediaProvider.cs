@@ -13,12 +13,12 @@ public class YouTubeMediaProvider : IMediaProvider
     private readonly YouTubeSettings _settings;
     private readonly YtDlpRunner _run;
 
-    public YouTubeMediaProvider(IPlugin plugin)
+    public YouTubeMediaProvider(IPluginContext plugin)
         : this(plugin, BuildRunner(plugin))
     {
     }
 
-    public YouTubeMediaProvider(IPlugin plugin, YtDlpRunner run)
+    public YouTubeMediaProvider(IPluginContext plugin, YtDlpRunner run)
     {
         _settings = plugin.BindSettings<YouTubeSettings>();
         _run = run;
@@ -54,7 +54,7 @@ public class YouTubeMediaProvider : IMediaProvider
         // hit in turn, which is a page load per row.
         var output = await _run(
             [
-                $"ytsearch{count.ToString(CultureInfo.InvariantCulture)}:{query}",
+                $"ytsearch{count.ToString(CultureInfo.InvariantCulture)}:{query} Karaoke",
                 "--dump-json",
                 "--flat-playlist",
                 "--no-warnings",
@@ -114,7 +114,7 @@ public class YouTubeMediaProvider : IMediaProvider
                 : null;
     }
 
-    private static YtDlpRunner BuildRunner(IPlugin plugin)
+    private static YtDlpRunner BuildRunner(IPluginContext plugin)
     {
         var settings = plugin.BindSettings<YouTubeSettings>();
 
@@ -122,7 +122,7 @@ public class YouTubeMediaProvider : IMediaProvider
             settings.YtDlpPath,
             Path.Combine(AppContext.BaseDirectory, "cache", "tools"));
 
-        return new YtDlp(resolver, settings.AutoUpdate).RunAsync;
+        return new YtDlp(resolver).RunAsync;
     }
 
     private Task OpenInBrowserAsync(MediaSearchEntity entity)
