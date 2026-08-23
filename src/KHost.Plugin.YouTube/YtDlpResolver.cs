@@ -79,7 +79,7 @@ public sealed class YtDlpResolver
                 Architecture.Arm64 => "yt-dlp_linux_aarch64",
 
                 // The one target published only as an archive, and a directory bundle rather than a
-                // single file — see ExtractAsync.
+                // single file — see Extract.
                 Architecture.Arm => "yt-dlp_linux_armv7l.zip",
 
                 _ => "yt-dlp_linux",
