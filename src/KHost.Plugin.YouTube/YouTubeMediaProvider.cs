@@ -1,28 +1,27 @@
 using KHost.Plugins.Sdk.Models;
 using KHost.Plugins.Sdk.Services;
 using System.Diagnostics;
-using System.Net;
+using System.Globalization;
 using System.Text.Json;
-using System.Xml;
 
 namespace KHost.Plugin.YouTube;
 
-public class YouTubeMediaProvider : IMediaProvider, IDisposable
+public class YouTubeMediaProvider : IMediaProvider
 {
     private const int MaxAllowedResults = 50;
 
     private readonly YouTubeSettings _settings;
-    private readonly HttpClient _http;
+    private readonly YtDlpRunner _run;
 
     public YouTubeMediaProvider(IPlugin plugin)
-        : this(plugin, new HttpClientHandler())
+        : this(plugin, BuildRunner(plugin))
     {
     }
 
-    public YouTubeMediaProvider(IPlugin plugin, HttpMessageHandler handler)
+    public YouTubeMediaProvider(IPlugin plugin, YtDlpRunner run)
     {
         _settings = plugin.BindSettings<YouTubeSettings>();
-        _http = new HttpClient(handler) { BaseAddress = new Uri("https://www.googleapis.com/youtube/v3/") };
+        _run = run;
 
         Actions = [
             new() {
@@ -42,79 +41,88 @@ public class YouTubeMediaProvider : IMediaProvider, IDisposable
 
     public async Task<List<MediaSearchEntity>> SearchAsync(string query, int pageNumber = 0, int pageSize = 0)
     {
-        var apiKey = _settings.ApiKey;
+        if (string.IsNullOrWhiteSpace(query))
+            return [];
 
-        if (string.IsNullOrWhiteSpace(apiKey))
-            throw new InvalidOperationException("YouTube Data API key is not configured; set it on the Plugins settings page.");
-
-        // The API pages by continuation token, not offset — only the first page is served.
+        // ytsearch takes a count, not an offset, so there is no page to serve but the first.
         if (pageNumber > 1)
             return [];
 
-        var maxResults = Math.Clamp(pageSize > 0 ? pageSize : _settings.MaxResults, 1, MaxAllowedResults);
-        var searchUrl = $"search?part=snippet&type=video&maxResults={maxResults}&q={Uri.EscapeDataString(query)}&key={Uri.EscapeDataString(apiKey)}";
+        var count = Math.Clamp(pageSize > 0 ? pageSize : _settings.MaxResults, 1, MaxAllowedResults);
 
-        using var searchDocument = JsonDocument.Parse(await _http.GetStringAsync(searchUrl));
+        // --flat-playlist keeps this to the search response itself. Without it yt-dlp resolves every
+        // hit in turn, which is a page load per row.
+        var output = await _run(
+            [
+                $"ytsearch{count.ToString(CultureInfo.InvariantCulture)}:{query}",
+                "--dump-json",
+                "--flat-playlist",
+                "--no-warnings",
+            ],
+            CancellationToken.None);
 
-        var videos = searchDocument.RootElement.GetProperty("items").EnumerateArray()
-            .Select(item => (
-                Id: item.GetProperty("id").GetProperty("videoId").GetString()!,
-                Snippet: item.GetProperty("snippet")))
-            .Select(video => (
-                video.Id,
-                // Titles come HTML-encoded (&amp;, &#39;) from the API.
-                Title: WebUtility.HtmlDecode(video.Snippet.GetProperty("title").GetString() ?? ""),
-                Channel: WebUtility.HtmlDecode(video.Snippet.GetProperty("channelTitle").GetString() ?? "")))
-            .ToList();
-
-        var durations = await ReadDurationsAsync(videos.Select(v => v.Id), apiKey);
-
-        // Artist stays empty on purpose: a video title is one string no parse splits reliably, and
-        // channelTitle is the uploader — "Sing King" is not who performed the song.
-        return [.. videos.Select(video => new MediaSearchEntity
-        {
-            Title = video.Title,
-            SourceDisplayName = DisplayName,
-            Source = SourceName,
-            ForeignKey = video.Id,
-            Duration = durations.GetValueOrDefault(video.Id),
-            Notes = video.Channel,
-            SupportedActions = Actions,
-        })];
+        return [.. ParseResults(output)];
     }
 
-    public void Dispose() => _http.Dispose();
-
-    private async Task<Dictionary<string, TimeSpan>> ReadDurationsAsync(IEnumerable<string> videoIds, string apiKey)
+    /// <summary>One JSON object per line. A blank or half-written line is skipped, not thrown over.</summary>
+    private IEnumerable<MediaSearchEntity> ParseResults(string output)
     {
-        var ids = string.Join(',', videoIds);
-
-        if (ids.Length == 0)
-            return [];
-
-        using var document = JsonDocument.Parse(
-            await _http.GetStringAsync($"videos?part=contentDetails&id={ids}&key={Uri.EscapeDataString(apiKey)}"));
-
-        var durations = new Dictionary<string, TimeSpan>();
-
-        foreach (var item in document.RootElement.GetProperty("items").EnumerateArray())
+        foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
-            var id = item.GetProperty("id").GetString()!;
-            var iso = item.GetProperty("contentDetails").GetProperty("duration").GetString();
-
-            if (iso is null) continue;
+            MediaSearchEntity entity;
 
             try
             {
-                durations[id] = XmlConvert.ToTimeSpan(iso);
-            }
-            catch (FormatException)
-            {
-                // Live streams report P0D and oddities; a missing duration is fine.
-            }
-        }
+                using var document = JsonDocument.Parse(line);
+                var root = document.RootElement;
 
-        return durations;
+                // Without an id there is nothing to enqueue or open later, so the row is no use.
+                if (!root.TryGetProperty("id", out var id) || id.GetString() is not { Length: > 0 } videoId)
+                    continue;
+
+                entity = new MediaSearchEntity
+                {
+                    // Artist stays empty on purpose: a video title is one string no parse splits
+                    // reliably, and the channel is the uploader — "Sing King" did not perform it.
+                    Title = root.TryGetProperty("title", out var title) ? title.GetString() ?? videoId : videoId,
+                    SourceDisplayName = DisplayName,
+                    Source = SourceName,
+                    ForeignKey = videoId,
+                    Duration = ReadDuration(root),
+                    Notes = root.TryGetProperty("channel", out var channel) ? channel.GetString() ?? "" : "",
+                    SupportedActions = Actions,
+                };
+            }
+            catch (JsonException)
+            {
+                continue;
+            }
+
+            yield return entity;
+        }
+    }
+
+    /// <summary>Seconds, and null for anything without a real one — a live stream reports none.</summary>
+    private static TimeSpan? ReadDuration(JsonElement root)
+    {
+        if (!root.TryGetProperty("duration", out var duration)) return null;
+
+        return duration.ValueKind is JsonValueKind.Number
+            && duration.TryGetDouble(out var seconds)
+            && seconds > 0
+                ? TimeSpan.FromSeconds(seconds)
+                : null;
+    }
+
+    private static YtDlpRunner BuildRunner(IPlugin plugin)
+    {
+        var settings = plugin.BindSettings<YouTubeSettings>();
+
+        var resolver = new YtDlpResolver(
+            settings.YtDlpPath,
+            Path.Combine(AppContext.BaseDirectory, "cache", "tools"));
+
+        return new YtDlp(resolver, settings.AutoUpdate).RunAsync;
     }
 
     private Task OpenInBrowserAsync(MediaSearchEntity entity)

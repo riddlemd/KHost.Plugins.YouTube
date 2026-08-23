@@ -8,7 +8,8 @@
   "entryAssembly": "KHost.Plugin.YouTube.dll",
   "apiVersion": 1,
   "settings": [
-    { "key": "apiKey", "type": "string", "label": "YouTube Data API Key", "secret": true },
-    { "key": "maxResults", "type": "int", "label": "Max Results", "default": 10 }
+    { "key": "ytDlpPath", "type": "string", "label": "yt-dlp Path (optional — found or fetched if blank)" },
+    { "key": "maxResults", "type": "int", "label": "Max Results", "default": 10 },
+    { "key": "autoUpdate", "type": "bool", "label": "Keep the downloaded yt-dlp up to date", "default": true }
   ]
 }
