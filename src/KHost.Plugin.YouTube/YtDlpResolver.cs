@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 
 namespace KHost.Plugin.YouTube;
 
@@ -15,6 +16,7 @@ namespace KHost.Plugin.YouTube;
 public sealed class YtDlpResolver
 {
     private const string LatestAssetUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download";
+    private const string SumsUrl = LatestAssetUrl + "/SHA2-512SUMS";
 
     private readonly string? _configuredPath;
     private readonly string _toolsDirectory;
@@ -166,6 +168,8 @@ public sealed class YtDlpResolver
                 await source.CopyToAsync(file, cancellationToken);
             }
 
+            await VerifyChecksumAsync(http, staging, asset, cancellationToken);
+
             if (isArchive)
                 Extract(staging, destination);
             else
@@ -179,6 +183,59 @@ public sealed class YtDlpResolver
         MakeExecutable(destination);
 
         return destination;
+    }
+
+    /// <summary>
+    /// A compromised release or a broken TLS chain both look like an ordinary successful download;
+    /// the published SUMS file is the only thing that says whether the bytes on disk are the bytes
+    /// yt-dlp actually shipped. Every way of failing to confirm that — the SUMS file not fetching,
+    /// the asset having no line in it, the hash not matching — is fatal, not a silent pass-through
+    /// to executing an unverified binary.
+    /// </summary>
+    private static async Task VerifyChecksumAsync(
+        HttpClient http, string stagedFile, string asset, CancellationToken cancellationToken)
+    {
+        string sums;
+
+        try
+        {
+            using var response = await http.GetAsync(SumsUrl, cancellationToken);
+            response.EnsureSuccessStatusCode();
+            sums = await response.Content.ReadAsStringAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            throw new InvalidOperationException(
+                $"Could not fetch yt-dlp's SHA2-512SUMS to verify '{asset}' before running it.", ex);
+        }
+
+        var expected = FindExpectedHash(sums, asset)
+            ?? throw new InvalidOperationException(
+                $"yt-dlp's SHA2-512SUMS has no entry for '{asset}' — refusing to run an unverified download.");
+
+        string actual;
+        await using (var stream = File.OpenRead(stagedFile))
+        {
+            actual = Convert.ToHexStringLower(await SHA512.HashDataAsync(stream, cancellationToken));
+        }
+
+        if (!string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"Downloaded '{asset}' does not match yt-dlp's published SHA-512 checksum — refusing to run it.");
+    }
+
+    /// <summary>Each line is "&lt;128-hex sha512&gt;  &lt;filename&gt;"; the archive case's filename includes ".zip".</summary>
+    private static string? FindExpectedHash(string sums, string asset)
+    {
+        foreach (var line in sums.Split('\n'))
+        {
+            var parts = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+
+            if (parts.Length >= 2 && string.Equals(parts[^1], asset, StringComparison.Ordinal))
+                return parts[0];
+        }
+
+        return null;
     }
 
     /// <summary>Unpacks beside the launcher, then swaps the whole folder into place.</summary>
