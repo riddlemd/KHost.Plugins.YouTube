@@ -1,9 +1,10 @@
 using KHost.Plugin.YouTube;
+using KHost.Plugins.Sdk.Models;
 using KHost.Plugins.Sdk.Services;
 
 namespace KHost.Plugin.YouTube.Tests;
 
-public class YouTubeMediaProviderTests
+public class YouTubeMediaProviderTests : IDisposable
 {
     // What `yt-dlp --dump-json --flat-playlist` emits: one object per line, not an array.
     private const string SearchOutput = """
@@ -12,14 +13,24 @@ public class YouTubeMediaProviderTests
         """;
 
     private readonly IPluginContext _plugin = Substitute.For<IPluginContext>();
+    private readonly IPluginLibrary _library = Substitute.For<IPluginLibrary>();
     private readonly FakeRunner _runner = new() { Output = SearchOutput };
     private readonly YouTubeMediaProvider _provider;
+    private readonly string _mediaDirectory = Path.Combine(Path.GetTempPath(), $"khost-yt-tests-{Guid.NewGuid():N}");
 
     public YouTubeMediaProviderTests()
     {
         _plugin.BindSettings<YouTubeSettings>().Returns(new YouTubeSettings { MaxResults = 10 });
+        _plugin.Library.Returns(_library);
+        _library.MediaDirectory.Returns(_mediaDirectory);
 
         _provider = new YouTubeMediaProvider(_plugin, _runner.RunAsync);
+    }
+
+    public void Dispose()
+    {
+        if (Directory.Exists(_mediaDirectory))
+            Directory.Delete(_mediaDirectory, recursive: true);
     }
 
     [Fact]
@@ -28,22 +39,42 @@ public class YouTubeMediaProviderTests
         var results = await _provider.SearchAsync("africa karaoke");
 
         Assert.Equal(2, results.Count);
-        Assert.Equal("Africa (Karaoke) & Lyrics", results[0].Title);
+        // The title is parsed, not verbatim: "(Karaoke) & Lyrics" is decoration the host doesn't
+        // want beside a song's name.
+        Assert.Equal("Africa", results[0].Title);
         Assert.Equal("abc123", results[0].ForeignKey);
         Assert.Equal("YouTube", results[0].Source);
-        Assert.Equal("Karaoke Channel", results[0].Notes);
         Assert.Equal(TimeSpan.FromSeconds(275), results[0].Duration);
     }
 
     [Fact]
-    public async Task SearchAsync_LeavesArtistEmpty_AndKeepsTheChannelAsANote()
+    public async Task SearchAsync_NoArtistCarrierInTitle_LeavesArtistEmpty()
     {
         var results = await _provider.SearchAsync("africa karaoke");
 
-        // The channel uploaded the video, it did not perform the song, so it must not reach the
-        // artist column the console renders beside the title.
+        // Neither fixture title names a performer, so the parse has nothing to put there.
         Assert.Equal(string.Empty, results[0].Artist);
-        Assert.Equal("Karaoke Channel", results[0].Notes);
+    }
+
+    [Fact]
+    public async Task SearchAsync_ParsedTitleDiffersFromRaw_KeepsTheRawTitleInNotesBesideTheChannel()
+    {
+        var results = await _provider.SearchAsync("africa karaoke");
+
+        // The parse can be wrong, so the actual video title has to stay visible somewhere even
+        // when it moves out of the Title column.
+        Assert.Equal("Karaoke Channel — “Africa (Karaoke) & Lyrics”", results[0].Notes);
+    }
+
+    [Fact]
+    public async Task SearchAsync_ParsedTitleDiffersFromRaw_NoChannel_OmitsTheLeadingDash()
+    {
+        _runner.Output = """{"id":"nocnl","title":"Wonderwall Karaoke","channel":"","duration":null}""";
+
+        var results = await _provider.SearchAsync("wonderwall");
+
+        // An empty channel must not leave a dangling " — " at the front of the note.
+        Assert.Equal("“Wonderwall Karaoke”", Assert.Single(results).Notes);
     }
 
     [Fact]
@@ -160,23 +191,278 @@ public class YouTubeMediaProviderTests
     }
 
     [Fact]
-    public void Actions_ExposesOpenOnYouTube()
+    public void Actions_ExposesOneTopLevelEnqueueActionWithOpenOnYouTubeAsASubAction()
     {
         var action = Assert.Single(_provider.Actions);
 
-        Assert.Equal("Open", action.DisplayName);
+        Assert.Equal("Enqueue", action.DisplayName);
+        var subAction = Assert.Single(action.SubActions);
+        Assert.Equal("Open on YouTube", subAction.DisplayName);
     }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_FileDoesNotExist_BeginsThenEnqueuesThenDownloadsThenCompletes()
+    {
+        var entity = BuildEntity("dl-happy", "Africa", "Toto", TimeSpan.FromMinutes(3), "some notes");
+        var destination = TrackDestinationFor(entity);
+
+        Assert.False(File.Exists(destination));
+
+        var order = new List<string>();
+        var mediaId = Guid.NewGuid();
+        StubBegin(mediaId);
+        _library.When(l => l.BeginImportAsync(Arg.Any<MediaImportRequest>())).Do(_ => order.Add("Begin"));
+        _library.When(l => l.EnqueueAsync(mediaId)).Do(_ => order.Add("Enqueue"));
+        _library.When(l => l.CompleteImportAsync(mediaId)).Do(_ => order.Add("Complete"));
+
+        // yt-dlp writes the destination as a side effect of running; the fake mirrors that so the
+        // post-download existence check finds something.
+        _runner.OnRun = _ =>
+        {
+            order.Add("Run");
+            File.WriteAllBytes(destination, [1]);
+        };
+
+        await Enqueue(entity);
+
+        var arguments = _runner.Calls.Single();
+        Assert.Equal($"https://www.youtube.com/watch?v={entity.ForeignKey}", arguments[0]);
+
+        var destinationIndex = arguments.ToList().IndexOf("-o");
+        Assert.True(destinationIndex >= 0);
+        Assert.Equal(destination, arguments[destinationIndex + 1]);
+
+        await _library.Received(1).BeginImportAsync(Arg.Is<MediaImportRequest>(r =>
+            r.FilePath == destination
+            && r.Title == entity.Title
+            && r.Artist == entity.Artist
+            && r.Duration == entity.Duration
+            && r.Notes == entity.Notes));
+        await _library.Received(1).EnqueueAsync(mediaId);
+        await _library.Received(1).CompleteImportAsync(mediaId);
+        await _library.DidNotReceive().ImportAsync(Arg.Any<MediaImportRequest>());
+
+        // The queue must show the Downloading row the moment the host clicks, not after the
+        // (possibly minutes-long) download finishes.
+        Assert.Equal(["Begin", "Enqueue", "Run", "Complete"], order);
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_FileAlreadyExists_SkipsTheDownloadButStillImportsAndEnqueues()
+    {
+        var entity = BuildEntity("dl-exists", "Wonderwall", "Oasis", TimeSpan.FromMinutes(4), "n");
+        var destination = TrackDestinationFor(entity);
+
+        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        File.WriteAllBytes(destination, [1]);
+
+        var mediaId = Guid.NewGuid();
+        _library.ImportAsync(Arg.Any<MediaImportRequest>()).Returns(mediaId);
+
+        await Enqueue(entity);
+
+        // A re-click must not re-fetch a video already sitting in the library's cache.
+        Assert.Empty(_runner.Calls);
+        await _library.Received(1).ImportAsync(Arg.Any<MediaImportRequest>());
+        await _library.Received(1).EnqueueAsync(mediaId);
+        await _library.DidNotReceive().BeginImportAsync(Arg.Any<MediaImportRequest>());
+        await _library.DidNotReceive().CompleteImportAsync(Arg.Any<Guid>());
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_DownloadProducesNoFile_FailsImportThenThrows()
+    {
+        var entity = BuildEntity("dl-fail", "Missing", "", null, "");
+        var mediaId = Guid.NewGuid();
+        StubBegin(mediaId);
+
+        // _runner.OnRun left unset: the fake runs "successfully" but never writes the file, the
+        // same shape a real yt-dlp failure leaves behind.
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Enqueue(entity));
+
+        await _library.Received(1).FailImportAsync(mediaId);
+        await _library.DidNotReceive().CompleteImportAsync(Arg.Any<Guid>());
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_RunnerThrows_FailsImportThenPropagates()
+    {
+        var entity = BuildEntity("dl-throw", "Broken", "", null, "");
+        var mediaId = Guid.NewGuid();
+        StubBegin(mediaId);
+        _runner.ThrowOnRun = new InvalidOperationException("yt-dlp exploded");
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => Enqueue(entity));
+
+        Assert.Equal("yt-dlp exploded", exception.Message);
+        await _library.Received(1).FailImportAsync(mediaId);
+        await _library.DidNotReceive().CompleteImportAsync(Arg.Any<Guid>());
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_SecondCallWhileFirstStillDownloading_ReturnsWithoutDuplicateRunOrEnqueue()
+    {
+        var entity = BuildEntity("dl-guard", "Slow", "", null, "");
+        var mediaId = Guid.NewGuid();
+        StubBegin(mediaId);
+
+        // Blocks the fake runner mid-"download" so a second call lands while the first is still
+        // in flight. No file is ever written, so both attempts follow the non-exists branch.
+        _runner.Gate = new TaskCompletionSource<string>();
+
+        var firstCall = Enqueue(entity);
+
+        var secondCall = Enqueue(entity);
+        await secondCall;
+
+        Assert.Single(_runner.Calls);
+        await _library.Received(1).EnqueueAsync(mediaId);
+        await _library.Received(1).BeginImportAsync(Arg.Any<MediaImportRequest>());
+
+        _runner.Gate.SetResult("");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => firstCall);
+
+        await _library.Received(1).FailImportAsync(mediaId);
+
+        // The finally block must have removed the ForeignKey from the in-flight set, so a third
+        // call after the first settles is allowed to start its own run.
+        _runner.Gate = null;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Enqueue(entity));
+        Assert.Equal(2, _runner.Calls.Count);
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_PassesTheTicketsCancellationTokenToTheRunner()
+    {
+        var entity = BuildEntity("dl-token", "Song", "", null, "");
+        var destination = TrackDestinationFor(entity);
+        using var cts = new CancellationTokenSource();
+        StubBegin(Guid.NewGuid(), cts.Token);
+        _runner.OnRun = _ => File.WriteAllBytes(destination, [1]);
+
+        await Enqueue(entity);
+
+        Assert.Equal(cts.Token, _runner.LastToken);
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_CancelledRun_DeletesArtifactsAndDiscardsImport()
+    {
+        var entity = BuildEntity("dl-cancel", "Interrupted", "", null, "");
+        var destination = TrackDestinationFor(entity);
+        var directory = Path.GetDirectoryName(destination)!;
+        Directory.CreateDirectory(directory);
+
+        // What a cancelled bv+ba download leaves behind: yt-dlp's own intermediates and a
+        // per-stream fragment file, pre-existing before the run — plus an unrelated video that
+        // must survive the sweep because it does not share this ForeignKey's prefix. Production
+        // code exits early via the "already downloaded" branch if the destination itself exists
+        // beforehand, so the destination is written by the (cancelled) run, like the happy path.
+        File.WriteAllBytes(destination + ".part", [1]);
+        File.WriteAllBytes(destination + ".ytdl", [1]);
+        var fragment = Path.Combine(directory, $"{entity.ForeignKey}.f137.mp4");
+        File.WriteAllBytes(fragment, [1]);
+        var unrelated = Path.Combine(directory, "someone-elses-video.mp4");
+        File.WriteAllBytes(unrelated, [1]);
+
+        var mediaId = Guid.NewGuid();
+        StubBegin(mediaId);
+        _runner.OnRun = _ => File.WriteAllBytes(destination, [1]);
+        _runner.ThrowOnRun = new OperationCanceledException();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => Enqueue(entity));
+
+        Assert.False(File.Exists(destination));
+        Assert.False(File.Exists(destination + ".part"));
+        Assert.False(File.Exists(destination + ".ytdl"));
+        Assert.False(File.Exists(fragment));
+        Assert.True(File.Exists(unrelated));
+
+        await _library.Received(1).DiscardImportAsync(mediaId);
+        await _library.DidNotReceive().FailImportAsync(Arg.Any<Guid>());
+        await _library.DidNotReceive().CompleteImportAsync(Arg.Any<Guid>());
+
+        // The finally block must still have released the ForeignKey guard on the cancel path.
+        _runner.ThrowOnRun = null;
+        _runner.OnRun = _ => File.WriteAllBytes(destination, [1]);
+        await Enqueue(entity);
+        Assert.Equal(2, _runner.Calls.Count);
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_CancelledRun_DestinationSurvivesCleanup_FailsImportInstead()
+    {
+        var entity = BuildEntity("dl-cancel-stuck", "Stuck", "", null, "");
+        var destination = TrackDestinationFor(entity);
+        var directory = Path.GetDirectoryName(destination)!;
+        Directory.CreateDirectory(directory);
+
+        // A directory sitting at the destination path: File.Exists reports it as absent (so the
+        // early "already downloaded" branch is not taken), but File.Delete on a directory throws,
+        // so the cleanup sweep cannot make it go away — exactly the "file remains" case.
+        Directory.CreateDirectory(destination);
+        File.WriteAllBytes(Path.Combine(destination, "stray"), [1]);
+        Assert.False(File.Exists(destination));
+
+        var mediaId = Guid.NewGuid();
+        StubBegin(mediaId);
+        _runner.ThrowOnRun = new OperationCanceledException();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => Enqueue(entity));
+
+        Assert.True(Directory.Exists(destination));
+        await _library.Received(1).FailImportAsync(mediaId);
+        await _library.DidNotReceive().DiscardImportAsync(Arg.Any<Guid>());
+        await _library.DidNotReceive().CompleteImportAsync(Arg.Any<Guid>());
+    }
+
+    private void StubBegin(Guid mediaId, CancellationToken token = default)
+        => _library.BeginImportAsync(Arg.Any<MediaImportRequest>())
+            .Returns(new ImportTicket { MediaId = mediaId, Cancellation = token });
+
+    private Task Enqueue(MediaSearchEntity entity) => _provider.Actions.Single().PerformAsync(entity);
+
+    private static MediaSearchEntity BuildEntity(
+        string foreignKey, string title, string artist, TimeSpan? duration, string notes)
+        => new()
+        {
+            SourceDisplayName = "YouTube",
+            Source = "YouTube",
+            ForeignKey = foreignKey,
+            Title = title,
+            Artist = artist,
+            Duration = duration,
+            Notes = notes,
+        };
+
+    /// <summary>Computes the destination the same way production code does.</summary>
+    private string TrackDestinationFor(MediaSearchEntity entity)
+        => Path.Combine(_mediaDirectory, "youtube", $"{entity.ForeignKey}.mp4");
 
     private sealed class FakeRunner
     {
         public string Output { get; set; } = "";
         public List<IReadOnlyList<string>> Calls { get; } = [];
+        public Action<IReadOnlyList<string>>? OnRun { get; set; }
+        public Exception? ThrowOnRun { get; set; }
+        public CancellationToken? LastToken { get; private set; }
 
-        public Task<string> RunAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken)
+        /// <summary>Set to make a call hang until the test releases it, to simulate an in-flight download.</summary>
+        public TaskCompletionSource<string>? Gate { get; set; }
+
+        public async Task<string> RunAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken)
         {
             Calls.Add(arguments);
+            LastToken = cancellationToken;
+            OnRun?.Invoke(arguments);
 
-            return Task.FromResult(Output);
+            if (Gate is { } gate)
+                await gate.Task;
+
+            if (ThrowOnRun is { } exception)
+                throw exception;
+
+            return Output;
         }
     }
 }

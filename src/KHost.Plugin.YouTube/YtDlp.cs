@@ -38,18 +38,30 @@ public sealed class YtDlp
         using var process = Process.Start(startInfo)
             ?? throw new InvalidOperationException($"Could not start yt-dlp at '{executable}'.");
 
-        // Both pipes drained at once. Reading one to the end first deadlocks as soon as the other
-        // fills its buffer — the same trap the host's ffmpeg wrapper documents.
-        var standardOutput = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var standardError = process.StandardError.ReadToEndAsync(cancellationToken);
+        try
+        {
+            // Both pipes drained at once. Reading one to the end first deadlocks as soon as the other
+            // fills its buffer — the same trap the host's ffmpeg wrapper documents.
+            var standardOutput = process.StandardOutput.ReadToEndAsync(cancellationToken);
+            var standardError = process.StandardError.ReadToEndAsync(cancellationToken);
 
-        await Task.WhenAll(standardOutput, standardError);
-        await process.WaitForExitAsync(cancellationToken);
+            await Task.WhenAll(standardOutput, standardError);
+            await process.WaitForExitAsync(cancellationToken);
 
-        if (process.ExitCode != 0)
-            throw new InvalidOperationException(
-                $"yt-dlp exited with {process.ExitCode}: {standardError.Result.Trim()}");
+            if (process.ExitCode != 0)
+                throw new InvalidOperationException(
+                    $"yt-dlp exited with {process.ExitCode}: {standardError.Result.Trim()}");
 
-        return standardOutput.Result;
+            return standardOutput.Result;
+        }
+        catch (OperationCanceledException)
+        {
+            // yt-dlp spawns ffmpeg to merge the bv+ba streams it downloads separately; a plain Kill
+            // leaves that ffmpeg process orphaned and still writing the destination file.
+            try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
+            catch { /* already gone */ }
+
+            throw;
+        }
     }
 }
