@@ -16,7 +16,8 @@ public static class YouTubeTitleParser
     // decoration; \b guards it so it never matches as a substring of a real word.
     private const string JunkVocabulary =
         @"karaoke(?:\s+version)?|instrumental|lyric\s+video|lyrics?|with\s+lyrics|lyrics\s+on\s+screen|"
-        + @"backing\s+track|official\s+(?:video|audio|music\s+video)|hd|4k|sing\s+along|minus\s+one|"
+        + @"backing\s+track|official\s+(?:video|audio|music\s+video)|hd|hq|4k|\d{3,4}p(?:\d{2})?|"
+        + @"sing\s+along|minus\s+one|"
         + @"no\s+lead\s+vocal|guide\s+vocal|\bcc\b";
 
     // Corpus-derived (spikes/title-parse-corpus): for each channel with >=5 graded spaced-dash rows,
@@ -75,6 +76,25 @@ public static class YouTubeTitleParser
     // junk phrase with nothing before it (the whole title is junk) still matches.
     private static readonly Regex TrailingJunkLink = new(
         $@"(?:\s*[-–—&|])?\s*(?:with\s+)?(?:{JunkVocabulary})\s*$", Options);
+
+    // A channel signs its own decoration, and the branding is not itself junk vocabulary, so the
+    // chain above stops the moment it reaches one: "Karaoke Version from Zoom Karaoke" peeled the
+    // final "Karaoke" and left "- Karaoke Version from Zoom" sitting in 128 corpus titles. Anything
+    // after "from" is the signature, so the whole tail goes — but only when a junk phrase introduced
+    // it, which is what keeps a real title like "Message from the Fireflies" intact.
+    private static readonly Regex TrailingBranding = new(
+        $@"(?:\s*[-–—&|])?\s*(?:with\s+)?(?:{JunkVocabulary})(?:{JunkConnector}(?:{JunkVocabulary}))*"
+        + @"\s+from\s+[^-–—|\(\)\[\]]+$", Options);
+
+    // Decoration fenced by emoji or a bracketed tag rather than by a separator ("🎤HQ Karaoke🎤",
+    // "[UVR]") — the fence is not a character the chain treats as a connector, so it never matched.
+    // The surrogate-pair alternative is required: .NET matches \p{So} per UTF-16 unit, so it does
+    // not match an emoji above the BMP — 🎤 is two units and slips straight past a bare \p{So}.
+    private const string Fence = @"(?:\p{So}|[\uD800-\uDBFF][\uDC00-\uDFFF]|[\[\]])";
+
+    private static readonly Regex TrailingFencedJunk = new(
+        $@"\s*{Fence}\s*(?:{JunkVocabulary})(?:{JunkConnector}(?:{JunkVocabulary}))*\s*{Fence}?\s*$",
+        Options);
 
     // A whole segment counts as junk only when EVERY word in it is junk vocabulary (chained the same
     // way BracketedJunk chains a bracket's contents) — not merely because "karaoke" appears somewhere
@@ -251,7 +271,9 @@ public static class YouTubeTitleParser
     {
         while (true)
         {
-            var match = TrailingJunkLink.Match(working);
+            var match = TrailingBranding.Match(working);
+            if (!match.Success) match = TrailingFencedJunk.Match(working);
+            if (!match.Success) match = TrailingJunkLink.Match(working);
             if (!match.Success) break;
 
             working = working[..match.Index];

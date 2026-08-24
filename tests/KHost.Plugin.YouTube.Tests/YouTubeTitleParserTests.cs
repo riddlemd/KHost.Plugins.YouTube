@@ -158,4 +158,43 @@ public class YouTubeTitleParserTests
         Assert.Equal("", title);
         Assert.Equal(string.Empty, artist);
     }
+    // The single largest title defect in the 500-song corpus: 128 rows kept "Karaoke Version from
+    // Zoom" because the branding after "from" is not junk vocabulary, so the chain stopped there.
+    [Fact]
+    public void Parse_JunkRunningIntoChannelBranding_TakesTheWholeTail()
+    {
+        var (title, artist) = YouTubeTitleParser.Parse(
+            "Garth Brooks - Friends In Low Places - Karaoke Version from Zoom Karaoke");
+
+        Assert.Equal("Friends In Low Places", title);
+        Assert.Equal("Garth Brooks", artist);
+    }
+
+    // "from" only introduces branding when a junk phrase led into it; a title that simply contains
+    // the word must survive intact.
+    [Fact]
+    public void Parse_ATitleContainingFrom_IsNotTreatedAsBranding()
+    {
+        var (title, artist) = YouTubeTitleParser.Parse("Alanis Morissette - Message from the Fireflies (Karaoke)");
+
+        Assert.Equal("Message from the Fireflies", title);
+        Assert.Equal("Alanis Morissette", artist);
+    }
+
+    [Fact]
+    public void Parse_JunkFencedByEmoji_IsStripped()
+    {
+        var (title, _) = YouTubeTitleParser.Parse("Your Body Is A Wonderland\U0001F3A4HQ Karaoke\U0001F3A4");
+
+        Assert.Equal("Your Body Is A Wonderland", title);
+    }
+
+    [Fact]
+    public void Parse_JunkFencedByBrackets_IsStripped()
+    {
+        var (title, artist) = YouTubeTitleParser.Parse("John Mayer - Gravity [Karaoke]");
+
+        Assert.Equal("Gravity", title);
+        Assert.Equal("John Mayer", artist);
+    }
 }
