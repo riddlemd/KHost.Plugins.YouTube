@@ -248,6 +248,89 @@ public class YouTubeMediaProviderTests : IDisposable
     }
 
     [Fact]
+    public async Task DownloadAndEnqueueAsync_FileDoesNotExist_SetsSourceToTheProvidersDisplayName()
+    {
+        var entity = BuildEntity("dl-source", "Africa", "Toto", TimeSpan.FromMinutes(3), "notes");
+        var destination = TrackDestinationFor(entity);
+        var mediaId = Guid.NewGuid();
+        StubBegin(mediaId);
+        _runner.OnRun = _ => File.WriteAllBytes(destination, [1]);
+
+        await Enqueue(entity);
+
+        await _library.Received(1).BeginImportAsync(Arg.Is<MediaImportRequest>(r => r.Source == "YouTube"));
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_FileAlreadyExists_SetsSourceToTheProvidersDisplayName()
+    {
+        var entity = BuildEntity("dl-source-exists", "Wonderwall", "Oasis", TimeSpan.FromMinutes(4), "n");
+        var destination = TrackDestinationFor(entity);
+        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        File.WriteAllBytes(destination, [1]);
+        _library.ImportAsync(Arg.Any<MediaImportRequest>()).Returns(Guid.NewGuid());
+
+        await Enqueue(entity);
+
+        await _library.Received(1).ImportAsync(Arg.Is<MediaImportRequest>(r => r.Source == "YouTube"));
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_DownloadArguments_IncludeNewlineSoProgressLinesAreEmittedOnePerLine()
+    {
+        var entity = BuildEntity("dl-newline", "Song", "", null, "");
+        var destination = TrackDestinationFor(entity);
+        StubBegin(Guid.NewGuid());
+        _runner.OnRun = _ => File.WriteAllBytes(destination, [1]);
+
+        await Enqueue(entity);
+
+        Assert.Contains("--newline", _runner.Calls.Single());
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_RunnerEmitsProgressLines_ReportsProgressWithASaneFraction()
+    {
+        var entity = BuildEntity("dl-progress", "Song", "", null, "");
+        var destination = TrackDestinationFor(entity);
+        var mediaId = Guid.NewGuid();
+        StubBegin(mediaId);
+
+        _runner.LinesToStream =
+        [
+            "[download] Destination: video.f137.mp4",
+            "[download]  50.0% of 10.00MiB at 1.00MiB/s ETA 00:05",
+            "[download] 100% of 10.00MiB in 00:10",
+        ];
+        _runner.OnRun = _ => File.WriteAllBytes(destination, [1]);
+
+        await Enqueue(entity);
+
+        await _library.Received().ReportDownloadProgressAsync(
+            mediaId, Arg.Is<double>(f => f >= 0.0 && f <= 1.0));
+        await _library.Received(1).ReportDownloadProgressAsync(mediaId, 0.25);
+        await _library.Received(1).ReportDownloadProgressAsync(mediaId, 0.5);
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_ReportDownloadProgressAsyncThrows_DoesNotFailTheDownload()
+    {
+        var entity = BuildEntity("dl-progress-throws", "Song", "", null, "");
+        var destination = TrackDestinationFor(entity);
+        var mediaId = Guid.NewGuid();
+        StubBegin(mediaId);
+        _library.ReportDownloadProgressAsync(Arg.Any<Guid>(), Arg.Any<double>())
+            .Returns<Task>(_ => throw new InvalidOperationException("host rejected it"));
+
+        _runner.LinesToStream = ["[download]  10.0% of 10.00MiB at 1.00MiB/s ETA 00:05"];
+        _runner.OnRun = _ => File.WriteAllBytes(destination, [1]);
+
+        await Enqueue(entity);
+
+        await _library.Received(1).CompleteImportAsync(mediaId);
+    }
+
+    [Fact]
     public async Task DownloadAndEnqueueAsync_FileAlreadyExists_SkipsTheDownloadButStillImportsAndEnqueues()
     {
         var entity = BuildEntity("dl-exists", "Wonderwall", "Oasis", TimeSpan.FromMinutes(4), "n");
@@ -450,11 +533,18 @@ public class YouTubeMediaProviderTests : IDisposable
         /// <summary>Set to make a call hang until the test releases it, to simulate an in-flight download.</summary>
         public TaskCompletionSource<string>? Gate { get; set; }
 
-        public async Task<string> RunAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken)
+        /// <summary>Lines to hand the caller's onLine callback, simulating streamed yt-dlp output.</summary>
+        public IReadOnlyList<string> LinesToStream { get; set; } = [];
+
+        public async Task<string> RunAsync(
+            IReadOnlyList<string> arguments, CancellationToken cancellationToken, Action<string>? onLine = null)
         {
             Calls.Add(arguments);
             LastToken = cancellationToken;
             OnRun?.Invoke(arguments);
+
+            foreach (var line in LinesToStream)
+                onLine?.Invoke(line);
 
             if (Gate is { } gate)
                 await gate.Task;

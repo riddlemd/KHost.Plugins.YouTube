@@ -15,6 +15,32 @@ public class YtDlpTests : IDisposable
     }
 
     [Fact]
+    public async Task RunAsync_OnLineSupplied_ReceivesEachLineAsItArrivesAndTheFullOutputIsStillReturned()
+    {
+        var resolver = new YtDlpResolver("/bin/sh", _root);
+        var ytDlp = new YtDlp(resolver);
+
+        var seen = new List<string>();
+        var output = await ytDlp.RunAsync(
+            ["-c", "echo one; echo two; echo three"],
+            onLine: seen.Add);
+
+        Assert.Equal(["one", "two", "three"], seen);
+        Assert.Equal("one\ntwo\nthree", output);
+    }
+
+    [Fact]
+    public async Task RunAsync_NoOnLineSupplied_StillReturnsFullOutput()
+    {
+        var resolver = new YtDlpResolver("/bin/sh", _root);
+        var ytDlp = new YtDlp(resolver);
+
+        var output = await ytDlp.RunAsync(["-c", "echo one; echo two"]);
+
+        Assert.Equal("one\ntwo", output);
+    }
+
+    [Fact]
     public async Task RunAsync_Cancelled_ThrowsOperationCanceled()
     {
         var resolver = new YtDlpResolver("/bin/sleep", _root);

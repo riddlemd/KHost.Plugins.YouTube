@@ -175,6 +175,7 @@ public class YouTubeMediaProvider : IMediaProvider
             Artist = entity.Artist,
             Duration = entity.Duration,
             Notes = entity.Notes,
+            Source = DisplayName,
         };
 
         // A re-click must not re-fetch a video already sitting in the library's cache.
@@ -196,6 +197,16 @@ public class YouTubeMediaProvider : IMediaProvider
             var ticket = await _plugin.Library.BeginImportAsync(request);
             await _plugin.Library.EnqueueAsync(ticket.MediaId);
 
+            var destinationsSeen = 0;
+            void OnLine(string line)
+            {
+                double? fraction;
+                (destinationsSeen, fraction) = YtDlpProgressParser.Parse(destinationsSeen, line);
+
+                if (fraction is { } value)
+                    _ = ReportProgressSafelyAsync(ticket.MediaId, value);
+            }
+
             string output;
             try
             {
@@ -209,8 +220,12 @@ public class YouTubeMediaProvider : IMediaProvider
                         "-o",
                         destination,
                         "--no-warnings",
+                        // Without it yt-dlp rewrites its progress line in place with carriage
+                        // returns, so line-by-line streaming never sees an update.
+                        "--newline",
                     ],
-                    ticket.Cancellation);
+                    ticket.Cancellation,
+                    OnLine);
             }
             catch (OperationCanceledException)
             {
@@ -234,6 +249,23 @@ public class YouTubeMediaProvider : IMediaProvider
         finally
         {
             _downloadsInFlight.TryRemove(entity.ForeignKey, out _);
+        }
+    }
+
+    /// <summary>
+    /// Fire-and-forget from a synchronous callback: the exception is caught here rather than left
+    /// to surface as an unobserved task, since a progress update failing must never take the
+    /// download itself down with it.
+    /// </summary>
+    private async Task ReportProgressSafelyAsync(Guid mediaId, double fraction)
+    {
+        try
+        {
+            await _plugin.Library.ReportDownloadProgressAsync(mediaId, fraction);
+        }
+        catch
+        {
+            // Best-effort UI update only; nothing here is worth failing the download over.
         }
     }
 
