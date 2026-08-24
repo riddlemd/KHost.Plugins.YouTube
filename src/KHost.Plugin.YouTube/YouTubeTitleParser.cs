@@ -153,10 +153,12 @@ public static class YouTubeTitleParser
     {
         var parsed = results.Select(r => ParseDetailed(r.RawTitle, r.ChannelName)).ToList();
 
-        var anchors = parsed
+        var stated = parsed
             .Where(p => p.Source == ArtistSource.Stated && p.Artist.Length > 0)
             .Select(p => Fold(p.Artist))
             .ToHashSet(StringComparer.Ordinal);
+
+        var anchors = new HashSet<string>(stated, StringComparer.Ordinal);
 
         // With no stated anchor, the set votes. Every result is the same song by the same artist, so
         // the name landing in the artist slot most often is the one the majority of channels agree
@@ -177,12 +179,27 @@ public static class YouTubeTitleParser
 
         return
         [
-            .. parsed.Select(p => p.Source == ArtistSource.Guessed
-                && anchors.Contains(Fold(p.Title))
-                && !anchors.Contains(Fold(p.Artist))
+            .. parsed.Select(p => ShouldSwap(p, anchors)
                     ? (p.Artist, p.Title)
                     : (p.Title, p.Artist))
         ];
+    }
+
+    /// <summary>
+    /// A guessed row is backwards when the name it put in the title is one the set knows as an
+    /// artist, and its own artist is not. Stated and modal anchors carry equal weight on purpose:
+    /// ranking stated above the vote scored worse on the corpus (69 swapped rows against 55),
+    /// because a carrier can match the wrong span and one bad statement then overrides a correct
+    /// majority.
+    /// </summary>
+    private static bool ShouldSwap(
+        (string Title, string Artist, ArtistSource Source) parsed,
+        IReadOnlySet<string> anchors)
+    {
+        if (parsed.Source != ArtistSource.Guessed) return false;
+
+        return anchors.Contains(Fold(parsed.Title))
+            && !anchors.Contains(Fold(parsed.Artist));
     }
 
     /// <summary>Case, spacing and punctuation are all noise when comparing two names.</summary>

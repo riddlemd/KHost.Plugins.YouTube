@@ -248,4 +248,48 @@ public class YouTubeTitleParserTests
 
         Assert.All(results, r => Assert.Equal(("Africa", "Toto"), r));
     }
+    // Two rows, opposite conventions, nothing stated: there is no majority, and picking one by
+    // enumeration order would make the "winner" arbitrary. Both stand as parsed instead.
+    [Fact]
+    public void ParseAll_AnEvenSplitWithNothingStated_ResolvesNeitherWay()
+    {
+        var results = YouTubeTitleParser.ParseAll(
+        [
+            ("Eagles - Hotel California (Karaoke)", "Sing King"),
+            ("Hotel California - Eagles (Karaoke Version)", "Karaoke PH"),
+        ]);
+
+        Assert.Equal(("Hotel California", "Eagles"), results[0]);
+        Assert.Equal(("Eagles", "Hotel California"), results[1]);
+    }
+    // Both halves of this row are anchors — the artist because another result stated it, the title
+    // because two backwards results made it the modal artist. A row already holding a known artist
+    // is left alone; swapping on the title match alone would break the one row that was right.
+    [Fact]
+    public void ParseAll_ARowWhoseArtistIsItselfAnAnchor_IsNotSwapped()
+    {
+        var results = YouTubeTitleParser.ParseAll(
+        [
+            ("Faithfully in the style of \"Journey\" karaoke", "Stingray Karaoke"),
+            ("Journey - Separate Ways (Karaoke)", "Sing King"),
+            ("Separate Ways - Journey (Karaoke)", "Karaoke PH"),
+            ("Separate Ways - Journey (Karaoke Version)", "My All Time Karaoke"),
+        ]);
+
+        Assert.Equal(("Separate Ways", "Journey"), results[1]);
+    }
+
+    // Names are compared folded, so a channel shouting the artist or punctuating it differently
+    // still counts as the same anchor.
+    [Fact]
+    public void ParseAll_AnchorsMatchAcrossCaseAndPunctuation()
+    {
+        var results = YouTubeTitleParser.ParseAll(
+        [
+            ("Stairway to Heaven in the style of \"Led Zeppelin\" karaoke", "Stingray Karaoke"),
+            ("STAIRWAY TO HEAVEN - LED-ZEPPELIN (karaoke version)", "My All Time Karaoke"),
+        ]);
+
+        Assert.Equal(("STAIRWAY TO HEAVEN", "LED-ZEPPELIN"), results[1]);
+    }
 }
