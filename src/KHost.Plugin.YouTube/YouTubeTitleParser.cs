@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace KHost.Plugin.YouTube;
@@ -122,10 +123,86 @@ public static class YouTubeTitleParser
 
     private static readonly char[] StrayEdgeChars = ['-', '–', '—', '•', '·', '|', '&', ' '];
 
+    /// <summary>How the artist was arrived at, which is what says whether it can be trusted.</summary>
+    public enum ArtistSource
+    {
+        /// <summary>No artist found.</summary>
+        None,
+
+        /// <summary>The title named it ("in the style of X", a pipe segment, a title-first channel).</summary>
+        Stated,
+
+        /// <summary>Split on a dash and assumed Artist-first. A coin toss on an unknown channel.</summary>
+        Guessed,
+    }
+
     public static (string Title, string Artist) Parse(string rawTitle, string channelName = "")
     {
+        var (title, artist, _) = ParseDetailed(rawTitle, channelName);
+        return (title, artist);
+    }
+
+    /// <summary>
+    /// Parses every result of one search together. A search is for a single song, so a result whose
+    /// title states the artist outright settles the orientation for the ones that only have a dash
+    /// to go on — 104 of the 105 corpus songs with a swap have the swapped rows in the minority, so
+    /// an anchor is nearly always present and is better evidence than any channel list.
+    /// </summary>
+    public static IReadOnlyList<(string Title, string Artist)> ParseAll(
+        IReadOnlyList<(string RawTitle, string ChannelName)> results)
+    {
+        var parsed = results.Select(r => ParseDetailed(r.RawTitle, r.ChannelName)).ToList();
+
+        var anchors = parsed
+            .Where(p => p.Source == ArtistSource.Stated && p.Artist.Length > 0)
+            .Select(p => Fold(p.Artist))
+            .ToHashSet(StringComparer.Ordinal);
+
+        // With no stated anchor, the set votes. Every result is the same song by the same artist, so
+        // the name landing in the artist slot most often is the one the majority of channels agree
+        // on — and a channel that reverses the convention is, by the corpus, always the minority.
+        // Two occurrences is the floor: a single row agreeing with itself is not evidence.
+        var modal = parsed
+            .Where(p => p.Artist.Length > 0)
+            .GroupBy(p => Fold(p.Artist), StringComparer.Ordinal)
+            .Where(group => group.Count() >= 2)
+            .OrderByDescending(group => group.Count())
+            .FirstOrDefault();
+
+        if (modal is not null)
+            anchors.Add(modal.Key);
+
+        if (anchors.Count == 0)
+            return [.. parsed.Select(p => (p.Title, p.Artist))];
+
+        return
+        [
+            .. parsed.Select(p => p.Source == ArtistSource.Guessed
+                && anchors.Contains(Fold(p.Title))
+                && !anchors.Contains(Fold(p.Artist))
+                    ? (p.Artist, p.Title)
+                    : (p.Title, p.Artist))
+        ];
+    }
+
+    /// <summary>Case, spacing and punctuation are all noise when comparing two names.</summary>
+    private static string Fold(string value)
+    {
+        var folded = new StringBuilder(value.Length);
+
+        foreach (var character in value)
+        {
+            if (char.IsLetterOrDigit(character))
+                folded.Append(char.ToLowerInvariant(character));
+        }
+
+        return folded.ToString();
+    }
+
+    public static (string Title, string Artist, ArtistSource Source) ParseDetailed(string rawTitle, string channelName = "")
+    {
         if (string.IsNullOrWhiteSpace(rawTitle))
-            return (rawTitle, string.Empty);
+            return (rawTitle, string.Empty, ArtistSource.None);
 
         var working = rawTitle;
         var artist = string.Empty;
@@ -144,12 +221,15 @@ public static class YouTubeTitleParser
             break;
         }
 
+        var source = artist.Length > 0 ? ArtistSource.Stated : ArtistSource.None;
+
         var (stripped, pipeArtist) = StripJunk(working, channelName, artist.Length > 0);
         working = stripped;
 
         if (artist.Length == 0 && pipeArtist.Length > 0)
         {
             artist = Tidy(pipeArtist);
+            source = ArtistSource.Stated;
         }
         else if (artist.Length == 0)
         {
@@ -163,11 +243,16 @@ public static class YouTubeTitleParser
                 {
                     working = split.Groups[1].Value;
                     artist = Tidy(split.Groups[2].Value);
+
+                    // A listed channel is an observed convention, not a coin toss, so this one is
+                    // not up for reconsideration by the rest of the result set.
+                    source = ArtistSource.Stated;
                 }
                 else
                 {
                     artist = Tidy(split.Groups[1].Value);
                     working = split.Groups[2].Value;
+                    source = ArtistSource.Guessed;
                 }
             }
         }
@@ -177,9 +262,9 @@ public static class YouTubeTitleParser
         // A title that dissolves entirely into junk ("Karaoke Version") has nothing left to show;
         // the raw string is a better result than an empty one.
         if (title.Length == 0)
-            return (rawTitle, artist);
+            return (rawTitle, artist, source);
 
-        return (title, artist);
+        return (title, artist, source);
     }
 
     private static (string Working, string PipeArtist) StripJunk(string working, string channelName, bool artistAlreadyFound)

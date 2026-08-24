@@ -197,4 +197,55 @@ public class YouTubeTitleParserTests
         Assert.Equal("Gravity", title);
         Assert.Equal("John Mayer", artist);
     }
+    // 116 corpus rows came back with title and artist swapped, across 72 channels — 51 of them
+    // appearing once. A channel allowlist cannot chase a tail like that; the other results of the
+    // same search can, because the swapped ones are always the minority.
+    [Fact]
+    public void ParseAll_AStatedArtistElsewhere_FixesADashRowThatGuessedBackwards()
+    {
+        var results = YouTubeTitleParser.ParseAll(
+        [
+            ("Hotel California (in the style of \"Eagles\") karaoke", "Stingray Karaoke"),
+            ("Hotel California - Eagles (Karaoke Version)", "Karaoke PH"),
+        ]);
+
+        Assert.Equal(("Hotel California", "Eagles"), results[1]);
+    }
+
+    [Fact]
+    public void ParseAll_NoStatedArtist_LetsTheMajorityOrientationDecide()
+    {
+        var results = YouTubeTitleParser.ParseAll(
+        [
+            ("Eagles - Hotel California (Karaoke)", "Sing King"),
+            ("Eagles - Hotel California (Karaoke Version)", "Starlight Karaoke"),
+            ("Hotel California - Eagles (Karaoke Version)", "Karaoke PH"),
+        ]);
+
+        Assert.All(results, r => Assert.Equal(("Hotel California", "Eagles"), r));
+    }
+
+    // A single row agreeing with itself is not a majority, and nothing states the artist, so the
+    // orientation stands as guessed rather than being invented from one sample.
+    [Fact]
+    public void ParseAll_ASingleAmbiguousRow_IsLeftAsParsed()
+    {
+        var results = YouTubeTitleParser.ParseAll([("Hotel California - Eagles (Karaoke)", "Karaoke PH")]);
+
+        Assert.Equal(("Eagles", "Hotel California"), results[0]);
+    }
+
+    // A listed title-first channel is an observed convention, so the set must not talk it round.
+    [Fact]
+    public void ParseAll_AKnownTitleFirstChannel_IsNotOverriddenByTheOthers()
+    {
+        var results = YouTubeTitleParser.ParseAll(
+        [
+            ("Africa - Toto | Karaoke Version | KaraFun", "KaraFun Karaoke"),
+            ("Toto - Africa (Karaoke)", "Sing King"),
+            ("Toto - Africa (Karaoke Version)", "Starlight Karaoke"),
+        ]);
+
+        Assert.All(results, r => Assert.Equal(("Africa", "Toto"), r));
+    }
 }

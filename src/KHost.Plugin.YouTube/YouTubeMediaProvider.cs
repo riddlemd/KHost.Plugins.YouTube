@@ -82,12 +82,12 @@ public class YouTubeMediaProvider : IMediaProvider
     }
 
     /// <summary>One JSON object per line. A blank or half-written line is skipped, not thrown over.</summary>
-    private IEnumerable<MediaSearchEntity> ParseResults(string output)
+    private List<MediaSearchEntity> ParseResults(string output)
     {
+        var rows = new List<(string VideoId, string RawTitle, string ChannelName, TimeSpan? Duration)>();
+
         foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
-            MediaSearchEntity entity;
-
             try
             {
                 using var document = JsonDocument.Parse(line);
@@ -97,31 +97,39 @@ public class YouTubeMediaProvider : IMediaProvider
                 if (!root.TryGetProperty("id", out var id) || id.GetString() is not { Length: > 0 } videoId)
                     continue;
 
-                var rawTitle = root.TryGetProperty("title", out var title) ? title.GetString() ?? videoId : videoId;
-                var channelName = root.TryGetProperty("channel", out var channel) ? channel.GetString() ?? "" : "";
-                var (parsedTitle, artist) = YouTubeTitleParser.Parse(rawTitle, channelName);
-
-                entity = new MediaSearchEntity
-                {
-                    Title = parsedTitle,
-                    Artist = artist,
-                    SourceDisplayName = DisplayName,
-                    Source = SourceName,
-                    ForeignKey = videoId,
-                    Duration = ReadDuration(root),
-                    // The parse can be wrong; keeping the real video title lets a host see what it
-                    // actually came from instead of just trusting the guess.
-                    Notes = BuildNotes(channelName, rawTitle, parsedTitle),
-                    SupportedActions = Actions,
-                };
+                rows.Add((
+                    videoId,
+                    root.TryGetProperty("title", out var title) ? title.GetString() ?? videoId : videoId,
+                    root.TryGetProperty("channel", out var channel) ? channel.GetString() ?? "" : "",
+                    ReadDuration(root)));
             }
             catch (JsonException)
             {
                 continue;
             }
-
-            yield return entity;
         }
+
+        // Parsed as a set, not row by row: one result that names the artist outright settles the
+        // orientation of the ones that only have a dash to go on.
+        var parsed = YouTubeTitleParser.ParseAll(
+            [.. rows.Select(row => (row.RawTitle, row.ChannelName))]);
+
+        return
+        [
+            .. rows.Select((row, index) => new MediaSearchEntity
+            {
+                Title = parsed[index].Title,
+                Artist = parsed[index].Artist,
+                SourceDisplayName = DisplayName,
+                Source = SourceName,
+                ForeignKey = row.VideoId,
+                Duration = row.Duration,
+                // The parse can be wrong; keeping the real video title lets a host see what it
+                // actually came from instead of just trusting the guess.
+                Notes = BuildNotes(row.ChannelName, row.RawTitle, parsed[index].Title),
+                SupportedActions = Actions,
+            })
+        ];
     }
 
     /// <summary>Channel name, plus the raw video title whenever the parse changed it.</summary>
