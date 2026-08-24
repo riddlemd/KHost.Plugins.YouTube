@@ -274,6 +274,7 @@ public class YouTubeTitleParserTests
             ("Journey - Separate Ways (Karaoke)", "Sing King"),
             ("Separate Ways - Journey (Karaoke)", "Karaoke PH"),
             ("Separate Ways - Journey (Karaoke Version)", "My All Time Karaoke"),
+            ("Separate Ways - Journey (Karaoke)", "Pinoy Karaoke Battle"),
         ]);
 
         Assert.Equal(("Separate Ways", "Journey"), results[1]);
