@@ -72,7 +72,7 @@ public class YouTubeMediaProvider : IMediaProvider
         new() { Key = ThumbnailKey, Header = "", Kind = MediaResultColumnKind.Thumbnail, Essential = false },
         new() { Key = MediaResultColumn.TitleKey, Header = "Title" },
         new() { Key = PublisherKey, Header = "Published by", Essential = false },
-        new() { Key = MediaResultColumn.DurationKey, Header = "Length" },
+        new() { Key = MediaResultColumn.DurationKey, Header = "Duration" },
     ];
 
     public async Task<List<MediaSearchEntity>> SearchAsync(string query, int pageNumber = 0, int pageSize = 0)

@@ -38,13 +38,16 @@ public class YouTubeMediaProviderTests : IDisposable
     /// of the video title and can be wrong, while the channel is stated by YouTube.
     /// </summary>
     [Fact]
-    public void Columns_ShowThePictureTitlePublisherAndLength()
+    public void Columns_ShowThePictureTitlePublisherAndDuration()
     {
         Assert.Equal(
             ["thumbnail", MediaResultColumn.TitleKey, "publisher", MediaResultColumn.DurationKey],
             _provider.Columns.Select(column => column.Key));
 
         Assert.DoesNotContain(MediaResultColumn.ArtistKey, _provider.Columns.Select(column => column.Key));
+
+        // Headed the same as the console's own default, rather than a synonym of it.
+        Assert.Equal(["", "Title", "Published by", "Duration"], _provider.Columns.Select(column => column.Header));
     }
 
     [Fact]
