@@ -1,6 +1,6 @@
 using System.Globalization;
 
-namespace KHost.Plugin.YouTube;
+namespace KHost.Plugins.YouTube;
 
 /// <summary>
 /// Turns one line of yt-dlp's <c>--newline</c> progress output into a fraction of the whole

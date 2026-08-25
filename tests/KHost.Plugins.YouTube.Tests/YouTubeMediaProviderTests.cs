@@ -1,8 +1,8 @@
-using KHost.Plugin.YouTube;
+using KHost.Plugins.YouTube;
 using KHost.Plugins.Sdk.Models;
 using KHost.Plugins.Sdk.Services;
 
-namespace KHost.Plugin.YouTube.Tests;
+namespace KHost.Plugins.YouTube.Tests;
 
 public class YouTubeMediaProviderTests : IDisposable
 {

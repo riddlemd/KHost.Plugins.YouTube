@@ -1,7 +1,7 @@
-using KHost.Plugin.YouTube;
+using KHost.Plugins.YouTube;
 using System.Diagnostics;
 
-namespace KHost.Plugin.YouTube.Tests;
+namespace KHost.Plugins.YouTube.Tests;
 
 public class YtDlpTests : IDisposable
 {

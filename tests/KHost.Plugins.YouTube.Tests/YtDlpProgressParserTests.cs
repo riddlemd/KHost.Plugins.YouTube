@@ -1,4 +1,4 @@
-namespace KHost.Plugin.YouTube.Tests;
+namespace KHost.Plugins.YouTube.Tests;
 
 public class YtDlpProgressParserTests
 {

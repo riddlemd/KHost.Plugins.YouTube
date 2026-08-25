@@ -1,7 +1,7 @@
 using KHost.Plugins.Sdk.Services;
 using Microsoft.Extensions.Logging;
 
-namespace KHost.Plugin.YouTube;
+namespace KHost.Plugins.YouTube;
 
 /// <summary>
 /// Settles yt-dlp before the first search rather than during it: resolving it may mean a 35MB

@@ -5,7 +5,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
 
-namespace KHost.Plugin.YouTube;
+namespace KHost.Plugins.YouTube;
 
 public class YouTubeMediaProvider : IMediaProvider
 {

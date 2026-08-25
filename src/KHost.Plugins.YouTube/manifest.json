@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "author": "KHost",
   "description": "Search YouTube for karaoke videos.",
-  "entryAssembly": "KHost.Plugin.YouTube.dll",
+  "entryAssembly": "KHost.Plugins.YouTube.dll",
   "apiVersion": 1,
   "settings": [
     { "key": "ytDlpPath", "type": "string", "label": "yt-dlp Path (optional — found or fetched if blank)" },

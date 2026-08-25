@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 
-namespace KHost.Plugin.YouTube;
+namespace KHost.Plugins.YouTube;
 
 /// <summary>
 /// Runs yt-dlp and hands back its stdout. The seam tests use instead of a real binary. The

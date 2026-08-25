@@ -22,7 +22,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\KHost.Plugin.YouTube\KHost.Plugin.YouTube.csproj" />
+    <ProjectReference Include="..\..\src\KHost.Plugins.YouTube\KHost.Plugins.YouTube.csproj" />
   </ItemGroup>
 
   <ItemGroup>

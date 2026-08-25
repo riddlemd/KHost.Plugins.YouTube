@@ -1,10 +1,10 @@
-using KHost.Plugin.YouTube;
+using KHost.Plugins.YouTube;
 using System.IO.Compression;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 
-namespace KHost.Plugin.YouTube.Tests;
+namespace KHost.Plugins.YouTube.Tests;
 
 public class YtDlpResolverTests : IDisposable
 {

@@ -1,6 +1,6 @@
-using KHost.Plugin.YouTube;
+using KHost.Plugins.YouTube;
 
-namespace KHost.Plugin.YouTube.Tests;
+namespace KHost.Plugins.YouTube.Tests;
 
 public class YouTubeTitleParserTests
 {

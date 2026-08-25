@@ -1,4 +1,4 @@
-namespace KHost.Plugin.YouTube;
+namespace KHost.Plugins.YouTube;
 
 /// <summary>Typed view of the settings declared in manifest.json — keep the two in sync.</summary>
 public class YouTubeSettings

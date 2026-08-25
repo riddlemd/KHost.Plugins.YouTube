@@ -1,4 +1,4 @@
-# KHost.Plugin.YouTube
+# KHost.Plugins.YouTube
 
 YouTube media provider for [KHost](../KHost). Adds a YouTube search provider to the console's
 Song Search panel, with an "Open on YouTube" result action.
@@ -19,12 +19,12 @@ Requires a sibling checkout of the KHost repo (the plugin compiles against
 ```
 ~/Developer/riddlemd/
   KHost/
-  KHost.Plugin.YouTube/
+  KHost.Plugins.YouTube/
 ```
 
 ```bash
-dotnet build KHost.Plugin.YouTube.slnx
-dotnet test tests/KHost.Plugin.YouTube.Tests
+dotnet build KHost.Plugins.YouTube.slnx
+dotnet test tests/KHost.Plugins.YouTube.Tests
 ```
 
 Building also drops the plugin into the sibling KHost checkout's runtime plugins folder

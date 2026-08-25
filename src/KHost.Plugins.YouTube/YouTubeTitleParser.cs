@@ -1,7 +1,7 @@
 using System.Text;
 using System.Text.RegularExpressions;
 
-namespace KHost.Plugin.YouTube;
+namespace KHost.Plugins.YouTube;
 
 /// <summary>
 /// Splits a YouTube video title into a song title and, where the title carries one, an artist.
