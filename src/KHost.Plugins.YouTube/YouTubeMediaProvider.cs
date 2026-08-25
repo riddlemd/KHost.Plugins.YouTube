@@ -53,6 +53,12 @@ public class YouTubeMediaProvider : IMediaProvider
     private const string ThumbnailKey = "thumbnail";
     private const string PublisherKey = "publisher";
 
+    /// <summary>
+    /// Not a column — no <see cref="MediaResultColumn"/> names it, so nothing renders it. It rides
+    /// along on the row so the import can write the parsed title while the list shows the raw one.
+    /// </summary>
+    private const string CleanTitleKey = "cleanTitle";
+
     /// <summary>YouTube's own verified tick, which its karaoke channels of any size carry.</summary>
     private const string VerifiedMark = " \u2713";
 
@@ -139,30 +145,48 @@ public class YouTubeMediaProvider : IMediaProvider
         [
             .. rows.Select((row, index) => new MediaSearchEntity
             {
-                Title = parsed[index].Title,
+                // The video's own title, not the parse: a host picking between near-identical
+                // karaoke uploads needs the words YouTube shows, decoration included.
+                Title = row.RawTitle,
                 Artist = parsed[index].Artist,
                 SourceDisplayName = DisplayName,
                 Source = SourceName,
                 ForeignKey = row.VideoId,
                 Duration = row.Duration,
-                // The parse can be wrong; keeping the real video title lets a host see what it
-                // actually came from instead of just trusting the guess.
-                Notes = BuildNotes(row.ChannelName, row.RawTitle, parsed[index].Title),
+                Notes = BuildNotes(row.ChannelName, row.RawTitle, parsed[index].Title, row.VideoId),
                 Fields = new Dictionary<string, string>
                 {
                     [ThumbnailKey] = row.Thumbnail,
                     [PublisherKey] = row.Verified ? row.ChannelName + VerifiedMark : row.ChannelName,
+                    // Carried rather than re-parsed at import: ParseAll settles a dash-only title
+                    // against the whole result set, and one row on its own can orient the wrong way.
+                    [CleanTitleKey] = parsed[index].Title,
                 },
                 SupportedActions = Actions,
             })
         ];
     }
 
-    /// <summary>Channel name, plus the raw video title whenever the parse changed it.</summary>
-    private static string BuildNotes(string channelName, string rawTitle, string parsedTitle)
-        => parsedTitle == rawTitle
-            ? channelName
-            : channelName.Length > 0 ? $"{channelName} — “{rawTitle}”" : $"“{rawTitle}”";
+    /// <summary>
+    /// Channel name, the raw video title whenever the parse changed it, and the watch URL. The
+    /// library row keeps the parsed title, so this is the only record of what it came from.
+    /// </summary>
+    private static string BuildNotes(string channelName, string rawTitle, string parsedTitle, string videoId)
+    {
+        var parts = new List<string>(3);
+
+        if (channelName.Length > 0)
+            parts.Add(channelName);
+
+        if (parsedTitle != rawTitle)
+            parts.Add($"“{rawTitle}”");
+
+        parts.Add(WatchUrl(videoId));
+
+        return string.Join(" — ", parts);
+    }
+
+    private static string WatchUrl(string videoId) => $"https://www.youtube.com/watch?v={videoId}";
 
     /// <summary>Seconds, and null for anything without a real one — a live stream reports none.</summary>
     private static TimeSpan? ReadDuration(JsonElement root)
@@ -190,7 +214,7 @@ public class YouTubeMediaProvider : IMediaProvider
     private Task OpenInBrowserAsync(MediaSearchEntity entity)
     {
         // KHost runs on the host's own machine, so the default browser is the right target.
-        Process.Start(new ProcessStartInfo($"https://www.youtube.com/watch?v={entity.ForeignKey}") { UseShellExecute = true });
+        Process.Start(new ProcessStartInfo(WatchUrl(entity.ForeignKey)) { UseShellExecute = true });
 
         return Task.CompletedTask;
     }
@@ -205,7 +229,10 @@ public class YouTubeMediaProvider : IMediaProvider
         var request = new MediaImportRequest
         {
             FilePath = destination,
-            Title = entity.Title,
+            // The list shows the raw video title; the library keeps the parse the search already did.
+            Title = entity.Fields.TryGetValue(CleanTitleKey, out var cleanTitle) && cleanTitle.Length > 0
+                ? cleanTitle
+                : entity.Title,
             Artist = entity.Artist,
             Duration = entity.Duration,
             Notes = entity.Notes,

@@ -116,12 +116,22 @@ public class YouTubeMediaProviderTests : IDisposable
         var results = await _provider.SearchAsync("africa karaoke");
 
         Assert.Equal(2, results.Count);
-        // The title is parsed, not verbatim: "(Karaoke) & Lyrics" is decoration the host doesn't
-        // want beside a song's name.
-        Assert.Equal("Africa", results[0].Title);
+        // Verbatim, decoration included: a host choosing between karaoke uploads is choosing on
+        // the words YouTube shows, and the parse would strip the ones that tell them apart.
+        Assert.Equal("Africa (Karaoke) & Lyrics", results[0].Title);
         Assert.Equal("abc123", results[0].ForeignKey);
         Assert.Equal("YouTube", results[0].Source);
         Assert.Equal(TimeSpan.FromSeconds(275), results[0].Duration);
+    }
+
+    [Fact]
+    public async Task SearchAsync_CarriesTheParsedTitleForTheImport()
+    {
+        var results = await _provider.SearchAsync("africa karaoke");
+
+        // The row shows the raw title, so the parse has to travel beside it — re-running it one
+        // row at a time on import would lose the orientation ParseAll settled across the set.
+        Assert.Equal("Africa", results[0].Fields["cleanTitle"]);
     }
 
     [Fact]
@@ -138,9 +148,24 @@ public class YouTubeMediaProviderTests : IDisposable
     {
         var results = await _provider.SearchAsync("africa karaoke");
 
-        // The parse can be wrong, so the actual video title has to stay visible somewhere even
-        // when it moves out of the Title column.
-        Assert.Equal("Karaoke Channel — “Africa (Karaoke) & Lyrics”", results[0].Notes);
+        // The library row keeps the parsed title, so the note is the only place the words the
+        // video actually carried survive the import.
+        Assert.Equal(
+            "Karaoke Channel — “Africa (Karaoke) & Lyrics” — https://www.youtube.com/watch?v=abc123",
+            results[0].Notes);
+    }
+
+    [Fact]
+    public async Task SearchAsync_ParsedTitleMatchesRaw_LeavesTheRawTitleOutOfNotes()
+    {
+        _runner.Output = """{"id":"clean1","title":"Africa","channel":"Karaoke Channel","duration":100}""";
+
+        var results = await _provider.SearchAsync("africa");
+
+        // Nothing was stripped, so repeating the title back would just be noise beside the link.
+        Assert.Equal(
+            "Karaoke Channel — https://www.youtube.com/watch?v=clean1",
+            Assert.Single(results).Notes);
     }
 
     [Fact]
@@ -151,7 +176,21 @@ public class YouTubeMediaProviderTests : IDisposable
         var results = await _provider.SearchAsync("wonderwall");
 
         // An empty channel must not leave a dangling " — " at the front of the note.
-        Assert.Equal("“Wonderwall Karaoke”", Assert.Single(results).Notes);
+        Assert.Equal(
+            "“Wonderwall Karaoke” — https://www.youtube.com/watch?v=nocnl",
+            Assert.Single(results).Notes);
+    }
+
+    [Fact]
+    public async Task SearchAsync_NotesCarryTheWatchUrl()
+    {
+        var results = await _provider.SearchAsync("africa karaoke");
+
+        // The library row is a local file path once imported; without this the host has no way
+        // back to what it was downloaded from.
+        Assert.All(
+            results,
+            result => Assert.Contains($"https://www.youtube.com/watch?v={result.ForeignKey}", result.Notes));
     }
 
     [Fact]
@@ -336,6 +375,58 @@ public class YouTubeMediaProviderTests : IDisposable
         await Enqueue(entity);
 
         await _library.Received(1).BeginImportAsync(Arg.Is<MediaImportRequest>(r => r.Source == "YouTube"));
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_CleanTitleCarried_ImportsTheParsedTitleNotTheRawOne()
+    {
+        var entity = BuildEntity(
+            "dl-clean", "Africa (Karaoke) & Lyrics", "Toto", TimeSpan.FromMinutes(3), "notes") with
+        {
+            Fields = new Dictionary<string, string> { ["cleanTitle"] = "Africa" },
+        };
+        var destination = TrackDestinationFor(entity);
+        StubBegin(Guid.NewGuid());
+        _runner.OnRun = _ => File.WriteAllBytes(destination, [1]);
+
+        await Enqueue(entity);
+
+        // The list is allowed to be verbatim; the library is not, or every row reads
+        // "(Karaoke) & Lyrics" forever.
+        await _library.Received(1).BeginImportAsync(Arg.Is<MediaImportRequest>(r => r.Title == "Africa"));
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_NoCleanTitleCarried_FallsBackToTheRowsOwnTitle()
+    {
+        // A row from an older search, or any caller that did not go through SearchAsync.
+        var entity = BuildEntity("dl-noclean", "Africa (Karaoke)", "Toto", TimeSpan.FromMinutes(3), "notes");
+        var destination = TrackDestinationFor(entity);
+        StubBegin(Guid.NewGuid());
+        _runner.OnRun = _ => File.WriteAllBytes(destination, [1]);
+
+        await Enqueue(entity);
+
+        await _library.Received(1).BeginImportAsync(
+            Arg.Is<MediaImportRequest>(r => r.Title == "Africa (Karaoke)"));
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_BlankCleanTitleCarried_FallsBackToTheRowsOwnTitle()
+    {
+        var entity = BuildEntity("dl-blankclean", "Africa (Karaoke)", "Toto", TimeSpan.FromMinutes(3), "n") with
+        {
+            Fields = new Dictionary<string, string> { ["cleanTitle"] = "" },
+        };
+        var destination = TrackDestinationFor(entity);
+        StubBegin(Guid.NewGuid());
+        _runner.OnRun = _ => File.WriteAllBytes(destination, [1]);
+
+        await Enqueue(entity);
+
+        // A parse that stripped everything must not leave the library row with a blank name.
+        await _library.Received(1).BeginImportAsync(
+            Arg.Is<MediaImportRequest>(r => r.Title == "Africa (Karaoke)"));
     }
 
     [Fact]
