@@ -9,6 +9,17 @@
   <ItemGroup>
     <!-- Sibling checkout of the KHost repo; swap for the KHost.Plugins.Sdk NuGet package once published. -->
     <ProjectReference Include="..\..\..\KHost\src\KHost.Plugins.Sdk\KHost.Plugins.Sdk.csproj" />
+    <!-- KHostException only. The host's error boundary shows its own words for that type and a
+         generic "something went wrong" for anything else, so a failure worth explaining has to be
+         thrown as one. The host's copy wins at runtime: PluginLoadContext defers to the default
+         context for an assembly already loaded, so the type thrown here is the type it catches. -->
+    <ProjectReference Include="..\..\..\KHost\src\KHost.Abstractions\KHost.Abstractions.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The stale-yt-dlp signature list is an implementation detail, but it is the part worth
+         pinning: it decides whether a host is told to update or handed a stack trace. -->
+    <InternalsVisibleTo Include="KHost.Plugins.YouTube.Tests" />
   </ItemGroup>
 
   <ItemGroup>
