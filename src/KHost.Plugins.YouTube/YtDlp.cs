@@ -1,6 +1,6 @@
 using System.Diagnostics;
 using System.Text;
-using KHost.Abstractions.Exceptions;
+using KHost.Plugins.Sdk.Exceptions;
 
 namespace KHost.Plugins.YouTube;
 
