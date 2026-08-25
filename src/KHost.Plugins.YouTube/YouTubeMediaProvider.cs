@@ -50,11 +50,30 @@ public class YouTubeMediaProvider : IMediaProvider
         ];
     }
 
+    private const string ThumbnailKey = "thumbnail";
+    private const string PublisherKey = "publisher";
+
+    /// <summary>YouTube's own verified tick, which its karaoke channels of any size carry.</summary>
+    private const string VerifiedMark = " \u2713";
+
     public string DisplayName => "YouTube";
 
     public string SourceName => "YouTube";
 
     public IEnumerable<MediaProviderAction> Actions { get; }
+
+    /// <summary>
+    /// What a host actually picks a karaoke track on. Artist is deliberately not among them: it is
+    /// parsed out of the video title and can be wrong, while the channel is stated by YouTube and
+    /// is the real answer to "is this a proper karaoke track or somebody's phone recording".
+    /// </summary>
+    public IReadOnlyList<MediaResultColumn> Columns =>
+    [
+        new() { Key = ThumbnailKey, Header = "", Kind = MediaResultColumnKind.Thumbnail, Essential = false },
+        new() { Key = MediaResultColumn.TitleKey, Header = "Title" },
+        new() { Key = PublisherKey, Header = "Published by", Essential = false },
+        new() { Key = MediaResultColumn.DurationKey, Header = "Length" },
+    ];
 
     public async Task<List<MediaSearchEntity>> SearchAsync(string query, int pageNumber = 0, int pageSize = 0)
     {
@@ -84,7 +103,7 @@ public class YouTubeMediaProvider : IMediaProvider
     /// <summary>One JSON object per line. A blank or half-written line is skipped, not thrown over.</summary>
     private List<MediaSearchEntity> ParseResults(string output)
     {
-        var rows = new List<(string VideoId, string RawTitle, string ChannelName, TimeSpan? Duration)>();
+        var rows = new List<(string VideoId, string RawTitle, string ChannelName, TimeSpan? Duration, bool Verified, string Thumbnail)>();
 
         foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
@@ -101,7 +120,9 @@ public class YouTubeMediaProvider : IMediaProvider
                     videoId,
                     root.TryGetProperty("title", out var title) ? title.GetString() ?? videoId : videoId,
                     root.TryGetProperty("channel", out var channel) ? channel.GetString() ?? "" : "",
-                    ReadDuration(root)));
+                    ReadDuration(root),
+                    root.TryGetProperty("channel_is_verified", out var verified) && verified.ValueKind is JsonValueKind.True,
+                    YouTubeThumbnails.Pick(root)));
             }
             catch (JsonException)
             {
@@ -127,6 +148,11 @@ public class YouTubeMediaProvider : IMediaProvider
                 // The parse can be wrong; keeping the real video title lets a host see what it
                 // actually came from instead of just trusting the guess.
                 Notes = BuildNotes(row.ChannelName, row.RawTitle, parsed[index].Title),
+                Fields = new Dictionary<string, string>
+                {
+                    [ThumbnailKey] = row.Thumbnail,
+                    [PublisherKey] = row.Verified ? row.ChannelName + VerifiedMark : row.ChannelName,
+                },
                 SupportedActions = Actions,
             })
         ];

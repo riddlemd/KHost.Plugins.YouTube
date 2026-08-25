@@ -33,6 +33,80 @@ public class YouTubeMediaProviderTests : IDisposable
             Directory.Delete(_mediaDirectory, recursive: true);
     }
 
+    /// <summary>
+    /// What a host picks a karaoke track on. Artist is not among them on purpose: it is parsed out
+    /// of the video title and can be wrong, while the channel is stated by YouTube.
+    /// </summary>
+    [Fact]
+    public void Columns_ShowThePictureTitlePublisherAndLength()
+    {
+        Assert.Equal(
+            ["thumbnail", MediaResultColumn.TitleKey, "publisher", MediaResultColumn.DurationKey],
+            _provider.Columns.Select(column => column.Key));
+
+        Assert.DoesNotContain(MediaResultColumn.ArtistKey, _provider.Columns.Select(column => column.Key));
+    }
+
+    [Fact]
+    public void Columns_ThePictureIsAThumbnail_SoTheConsoleDrawsItRatherThanPrintingTheUrl()
+        => Assert.Equal(MediaResultColumnKind.Thumbnail, _provider.Columns[0].Kind);
+
+    /// <summary>The title and the length are what is left when the panel runs out of room.</summary>
+    [Fact]
+    public void Columns_ThePictureAndPublisher_MayBeDroppedWhenNarrow()
+    {
+        Assert.False(_provider.Columns[0].Essential);
+        Assert.False(_provider.Columns[2].Essential);
+        Assert.True(_provider.Columns[1].Essential);
+        Assert.True(_provider.Columns[3].Essential);
+    }
+
+    [Fact]
+    public async Task SearchAsync_CarriesThePublishingChannel()
+    {
+        _runner.Output = """
+            {"id":"abc123","title":"Africa (Karaoke)","channel":"Sing King","duration":275,"channel_is_verified":true}
+            """;
+
+        var results = await _provider.SearchAsync("africa karaoke");
+
+        // The channel was already being read and then thrown away in Notes, which the console
+        // never rendered — this is the information the whole column set exists to surface.
+        Assert.Equal("Sing King \u2713", results[0].Fields["publisher"]);
+    }
+
+    [Fact]
+    public async Task SearchAsync_AnUnverifiedChannel_GetsNoTick()
+    {
+        _runner.Output = """
+            {"id":"abc123","title":"Africa (Karaoke)","channel":"Some Bloke","duration":275}
+            """;
+
+        var results = await _provider.SearchAsync("africa karaoke");
+
+        Assert.Equal("Some Bloke", results[0].Fields["publisher"]);
+    }
+
+    [Fact]
+    public async Task SearchAsync_CarriesTheThumbnail()
+    {
+        _runner.Output = """
+            {"id":"abc123","title":"Africa","channel":"Sing King","duration":275,"thumbnails":[{"url":"https://i.ytimg.com/vi/abc123/hq720.jpg","width":360}]}
+            """;
+
+        var results = await _provider.SearchAsync("africa karaoke");
+
+        Assert.Equal("https://i.ytimg.com/vi/abc123/hq720.jpg", results[0].Fields["thumbnail"]);
+    }
+
+    [Fact]
+    public async Task SearchAsync_NoThumbnailInTheResult_LeavesTheFieldEmpty()
+    {
+        var results = await _provider.SearchAsync("africa karaoke");
+
+        Assert.Equal(string.Empty, results[0].Fields["thumbnail"]);
+    }
+
     [Fact]
     public async Task SearchAsync_MapsResults()
     {
