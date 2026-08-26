@@ -329,8 +329,8 @@ public static class YouTubeTitleParser
                 else
                 {
                     // No named carrier claimed the artist, and only two pipe segments are left:
-                    // YouTube's own "Artist | Title" convention, distinct from KaraFun's spaced-dash
-                    // "Title - Artist".
+                    // YouTube's own "Artist | Title" convention, distinct from the spaced-dash
+                    // "Title - Artist" convention.
                     pipeArtist = segments[0];
                     working = segments[1];
                 }

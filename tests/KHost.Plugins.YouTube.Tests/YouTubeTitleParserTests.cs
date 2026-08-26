@@ -24,7 +24,7 @@ public class YouTubeTitleParserTests
     }
 
     [Theory]
-    [InlineData("Africa - Toto | Karaoke Version | KaraFun", "KaraFun Karaoke", "Africa", "Toto")]
+    [InlineData("Africa - Toto | Karaoke Version | EdKara", "EdKara Karaoke", "Africa", "Toto")]
     [InlineData("Toto - Africa - Karaoke Instrumental Lyrics - ObsKure", "ObsKure Karaoke", "Africa", "Toto")]
     [InlineData("Toto | Africa | Karaoke", "Reekies Karaoke", "Africa", "Toto")]
     [InlineData("Toto - Africa (Karaoke Version) with Lyrics On Screen", "Zoom Karaoke Official", "Africa", "Toto")]
@@ -92,12 +92,12 @@ public class YouTubeTitleParserTests
     [Fact]
     public void Parse_ChannelOverlapSegment_IsNotDroppedWhenItIsTheOnlySegmentLeft()
     {
-        // "KaraFun" overlaps the channel and would normally be dropped, but it is the only pipe
+        // "EdKara" overlaps the channel and would normally be dropped, but it is the only pipe
         // segment left once "Karaoke Version" is stripped as plain junk — dropping it too would
         // erase the title entirely, so the guard has to keep it.
-        var (title, artist) = YouTubeTitleParser.Parse("KaraFun | Karaoke Version", "KaraFun Karaoke");
+        var (title, artist) = YouTubeTitleParser.Parse("EdKara | Karaoke Version", "EdKara Karaoke");
 
-        Assert.Equal("KaraFun", title);
+        Assert.Equal("EdKara", title);
         Assert.Equal("", artist);
     }
 
@@ -241,7 +241,7 @@ public class YouTubeTitleParserTests
     {
         var results = YouTubeTitleParser.ParseAll(
         [
-            ("Africa - Toto | Karaoke Version | KaraFun", "KaraFun Karaoke"),
+            ("Africa - Toto | Karaoke Version | EdKara", "EdKara Karaoke"),
             ("Toto - Africa (Karaoke)", "Sing King"),
             ("Toto - Africa (Karaoke Version)", "Starlight Karaoke"),
         ]);
