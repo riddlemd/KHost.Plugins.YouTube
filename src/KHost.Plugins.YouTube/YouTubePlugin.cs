@@ -34,7 +34,10 @@ public sealed class YouTubePlugin : IPlugin
         return Task.CompletedTask;
     }
 
-    private static async Task PrepareAsync(
+    // Internal, not private: the branch logic here — what warning a host is shown when yt-dlp is
+    // missing, provided, or a downloaded copy — is the part worth a test, and InitializeAsync only
+    // ever fires it on a background task nothing can await.
+    internal static async Task PrepareAsync(
         YtDlpResolver resolver, YouTubeSettings settings, IPluginContext context, ILogger logger)
     {
         string executable;
