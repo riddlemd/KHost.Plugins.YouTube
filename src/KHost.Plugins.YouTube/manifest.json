@@ -1,5 +1,5 @@
 {
-  "$schema": "../../../KHost/src/KHost.Plugins.Sdk/manifest.schema.json",
+  "$schema": "../../../KHost/src/KHost.Abstractions/Models/Plugins/manifest.schema.json",
   "id": "88f42c92-f15a-443c-afa0-0983f05fdbb4",
   "name": "YouTube Search",
   "version": "1.0.0",

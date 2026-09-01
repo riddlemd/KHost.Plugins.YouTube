@@ -1,6 +1,7 @@
 using KHost.Plugins.YouTube;
-using KHost.Plugins.Sdk.Models;
-using KHost.Plugins.Sdk.Services;
+using KHost.Abstractions.Models;
+using KHost.Abstractions.Services;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace KHost.Plugins.YouTube.Tests;
 
@@ -13,7 +14,10 @@ public class YouTubeMediaProviderTests : IDisposable
         """;
 
     private readonly IPluginContext _plugin = Substitute.For<IPluginContext>();
-    private readonly IPluginLibrary _library = Substitute.For<IPluginLibrary>();
+    private readonly IMediaAcquisitionService _library = Substitute.For<IMediaAcquisitionService>();
+    private readonly ISingerQueueService _queue = Substitute.For<ISingerQueueService>();
+    private readonly IPerformanceService _performances = Substitute.For<IPerformanceService>();
+    private readonly Guid _singerId = Guid.NewGuid();
     private readonly FakeRunner _runner = new() { Output = SearchOutput };
     private readonly YouTubeMediaProvider _provider;
     private readonly string _mediaDirectory = Path.Combine(Path.GetTempPath(), $"khost-yt-tests-{Guid.NewGuid():N}");
@@ -21,10 +25,14 @@ public class YouTubeMediaProviderTests : IDisposable
     public YouTubeMediaProviderTests()
     {
         _plugin.BindSettings<YouTubeSettings>().Returns(new YouTubeSettings { MaxResults = 10 });
-        _plugin.Library.Returns(_library);
         _library.MediaDirectory.Returns(_mediaDirectory);
 
-        _provider = new YouTubeMediaProvider(_plugin, _runner.RunAsync);
+        // Enqueuing is composed from the queue and performances now, so without a selected singer
+        // every enqueue in here would no-op and the assertions would pass for the wrong reason.
+        _queue.SelectedUserId.Returns(_singerId);
+
+        _provider = new YouTubeMediaProvider(
+            _plugin, _library, _queue, _performances, NullLogger<YouTubeMediaProvider>.Instance, _runner.RunAsync);
     }
 
     public void Dispose()
@@ -328,7 +336,8 @@ public class YouTubeMediaProviderTests : IDisposable
         var mediaId = Guid.NewGuid();
         StubBegin(mediaId);
         _library.When(l => l.BeginImportAsync(Arg.Any<MediaImportRequest>())).Do(_ => order.Add("Begin"));
-        _library.When(l => l.EnqueueAsync(mediaId)).Do(_ => order.Add("Enqueue"));
+        _performances.When(p => p.CreateAndEnqueueAsync(Arg.Is<Performance>(x => x.MediaId == mediaId)))
+            .Do(_ => order.Add("Enqueue"));
         _library.When(l => l.CompleteImportAsync(mediaId)).Do(_ => order.Add("Complete"));
 
         // yt-dlp writes the destination as a side effect of running; the fake mirrors that so the
@@ -354,7 +363,8 @@ public class YouTubeMediaProviderTests : IDisposable
             && r.Artist == entity.Artist
             && r.Duration == entity.Duration
             && r.Notes == entity.Notes));
-        await _library.Received(1).EnqueueAsync(mediaId);
+        await _performances.Received(1).CreateAndEnqueueAsync(
+            Arg.Is<Performance>(p => p.MediaId == mediaId && p.SingerId == _singerId));
         await _library.Received(1).CompleteImportAsync(mediaId);
         await _library.DidNotReceive().ImportAsync(Arg.Any<MediaImportRequest>());
 
@@ -515,9 +525,33 @@ public class YouTubeMediaProviderTests : IDisposable
         // A re-click must not re-fetch a video already sitting in the library's cache.
         Assert.Empty(_runner.Calls);
         await _library.Received(1).ImportAsync(Arg.Any<MediaImportRequest>());
-        await _library.Received(1).EnqueueAsync(mediaId);
+        await _performances.Received(1).CreateAndEnqueueAsync(
+            Arg.Is<Performance>(p => p.MediaId == mediaId && p.SingerId == _singerId));
         await _library.DidNotReceive().BeginImportAsync(Arg.Any<MediaImportRequest>());
         await _library.DidNotReceive().CompleteImportAsync(Arg.Any<Guid>());
+    }
+
+    /// <summary>
+    /// The enqueue rule used to live behind the host's plugin facade; composing it here means the
+    /// no-singer case is this provider's to get right. The import still stands — the file is in the
+    /// library either way, and only the queue entry needed a singer.
+    /// </summary>
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_NoSingerSelected_ImportsWithoutEnqueuing()
+    {
+        var entity = BuildEntity("dl-nosinger", "Creep", "Radiohead", TimeSpan.FromMinutes(4), "n");
+        var destination = TrackDestinationFor(entity);
+
+        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        File.WriteAllBytes(destination, [1]);
+
+        _queue.SelectedUserId.Returns((Guid?)null);
+        _library.ImportAsync(Arg.Any<MediaImportRequest>()).Returns(Guid.NewGuid());
+
+        await Enqueue(entity);
+
+        await _library.Received(1).ImportAsync(Arg.Any<MediaImportRequest>());
+        await _performances.DidNotReceive().CreateAndEnqueueAsync(Arg.Any<Performance>());
     }
 
     [Fact]
@@ -567,7 +601,8 @@ public class YouTubeMediaProviderTests : IDisposable
         await secondCall;
 
         Assert.Single(_runner.Calls);
-        await _library.Received(1).EnqueueAsync(mediaId);
+        await _performances.Received(1).CreateAndEnqueueAsync(
+            Arg.Is<Performance>(p => p.MediaId == mediaId && p.SingerId == _singerId));
         await _library.Received(1).BeginImportAsync(Arg.Any<MediaImportRequest>());
 
         _runner.Gate.SetResult("");

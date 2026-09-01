@@ -1,5 +1,6 @@
-using KHost.Plugins.Sdk.Models;
-using KHost.Plugins.Sdk.Services;
+using KHost.Abstractions.Models;
+using KHost.Abstractions.Services;
+using Microsoft.Extensions.Logging;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
@@ -12,6 +13,10 @@ public class YouTubeMediaProvider : IMediaProvider
     private const int MaxAllowedResults = 50;
 
     private readonly IPluginContext _plugin;
+    private readonly IMediaAcquisitionService _media;
+    private readonly ISingerQueueService _queue;
+    private readonly IPerformanceService _performances;
+    private readonly ILogger<YouTubeMediaProvider> _logger;
     private readonly YouTubeSettings _settings;
     private readonly YtDlpRunner _run;
 
@@ -21,14 +26,31 @@ public class YouTubeMediaProvider : IMediaProvider
     // the DB row, not the in-flight process.
     private readonly ConcurrentDictionary<string, byte> _downloadsInFlight = new();
 
-    public YouTubeMediaProvider(IPluginContext plugin)
-        : this(plugin, BuildRunner(plugin))
+    // Every parameter past the context comes from the host's own container: the loader builds
+    // providers with ActivatorUtilities, so there is no facade to go through for them.
+    public YouTubeMediaProvider(
+        IPluginContext plugin,
+        IMediaAcquisitionService media,
+        ISingerQueueService queue,
+        IPerformanceService performances,
+        ILogger<YouTubeMediaProvider> logger)
+        : this(plugin, media, queue, performances, logger, BuildRunner(plugin))
     {
     }
 
-    public YouTubeMediaProvider(IPluginContext plugin, YtDlpRunner run)
+    public YouTubeMediaProvider(
+        IPluginContext plugin,
+        IMediaAcquisitionService media,
+        ISingerQueueService queue,
+        IPerformanceService performances,
+        ILogger<YouTubeMediaProvider> logger,
+        YtDlpRunner run)
     {
         _plugin = plugin;
+        _media = media;
+        _queue = queue;
+        _performances = performances;
+        _logger = logger;
         _settings = plugin.BindSettings<YouTubeSettings>();
         _run = run;
 
@@ -219,10 +241,28 @@ public class YouTubeMediaProvider : IMediaProvider
         return Task.CompletedTask;
     }
 
+    // The queue owns who is selected and performances own the enqueue; neither may take the
+    // other, so a caller that wants both composes them.
+    private async Task EnqueueForSelectedSingerAsync(Guid mediaId)
+    {
+        if (_queue.SelectedUserId is not { } singerId)
+        {
+            _logger.LogWarning("Cannot enqueue: no singer selected");
+            return;
+        }
+
+        await _performances.CreateAndEnqueueAsync(new()
+        {
+            MediaId = mediaId,
+            SingerId = singerId,
+            CreatedDate = DateTime.UtcNow,
+        });
+    }
+
     private async Task DownloadAndEnqueueAsync(MediaSearchEntity entity)
     {
         // Read per call: the host can hot-reload MediaDirectory, so a cached value could go stale.
-        var directory = Path.Combine(_plugin.Library.MediaDirectory, "youtube");
+        var directory = Path.Combine(_media.MediaDirectory, "youtube");
         Directory.CreateDirectory(directory);
 
         var destination = Path.Combine(directory, $"{entity.ForeignKey}.mp4");
@@ -242,8 +282,8 @@ public class YouTubeMediaProvider : IMediaProvider
         // A re-click must not re-fetch a video already sitting in the library's cache.
         if (File.Exists(destination))
         {
-            var readyId = await _plugin.Library.ImportAsync(request);
-            await _plugin.Library.EnqueueAsync(readyId);
+            var readyId = await _media.ImportAsync(request);
+            await EnqueueForSelectedSingerAsync(readyId);
             return;
         }
 
@@ -255,8 +295,8 @@ public class YouTubeMediaProvider : IMediaProvider
             // Enqueue immediately, before the download runs, so the singer's queue shows the
             // Downloading spinner row the moment the host clicks — not minutes later on slow
             // venue internet.
-            var ticket = await _plugin.Library.BeginImportAsync(request);
-            await _plugin.Library.EnqueueAsync(ticket.MediaId);
+            var ticket = await _media.BeginImportAsync(request);
+            await EnqueueForSelectedSingerAsync(ticket.MediaId);
 
             var destinationsSeen = 0;
             void OnLine(string line)
@@ -295,17 +335,17 @@ public class YouTubeMediaProvider : IMediaProvider
             }
             catch
             {
-                await _plugin.Library.FailImportAsync(ticket.MediaId);
+                await _media.FailImportAsync(ticket.MediaId);
                 throw;
             }
 
             if (!File.Exists(destination))
             {
-                await _plugin.Library.FailImportAsync(ticket.MediaId);
+                await _media.FailImportAsync(ticket.MediaId);
                 throw new InvalidOperationException($"yt-dlp did not produce '{destination}': {output}");
             }
 
-            await _plugin.Library.CompleteImportAsync(ticket.MediaId);
+            await _media.CompleteImportAsync(ticket.MediaId);
         }
         finally
         {
@@ -322,7 +362,7 @@ public class YouTubeMediaProvider : IMediaProvider
     {
         try
         {
-            await _plugin.Library.ReportDownloadProgressAsync(mediaId, fraction);
+            await _media.ReportDownloadProgressAsync(mediaId, fraction);
         }
         catch
         {
@@ -351,8 +391,8 @@ public class YouTubeMediaProvider : IMediaProvider
         }
 
         if (Path.Exists(destination))
-            await _plugin.Library.FailImportAsync(mediaId);
+            await _media.FailImportAsync(mediaId);
         else
-            await _plugin.Library.DiscardImportAsync(mediaId);
+            await _media.DiscardImportAsync(mediaId);
     }
 }

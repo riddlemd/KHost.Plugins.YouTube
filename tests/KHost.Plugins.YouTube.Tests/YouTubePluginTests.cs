@@ -1,4 +1,4 @@
-using KHost.Plugins.Sdk.Services;
+using KHost.Abstractions.Services;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace KHost.Plugins.YouTube.Tests;
