@@ -5,6 +5,7 @@
   "version": "1.0.0",
   "author": "KHost",
   "description": "Search YouTube for karaoke videos.",
+  "icon": "search",
   "entryAssembly": "KHost.Plugins.YouTube.dll",
   "apiVersion": 1,
   "settings": [
