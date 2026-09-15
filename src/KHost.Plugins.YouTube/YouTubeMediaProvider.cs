@@ -333,15 +333,17 @@ public class YouTubeMediaProvider : IMediaProvider
                 await CleanUpAfterCancelAsync(directory, entity.ForeignKey, destination, ticket.MediaId);
                 throw;
             }
-            catch
+            catch (Exception ex)
             {
-                await _media.FailImportAsync(ticket.MediaId);
+                // The message rather than the type: this is read on the Downloads page at a
+                // glance, and yt-dlp's own line is already the useful half of it.
+                await _media.FailImportAsync(ticket.MediaId, ex.Message);
                 throw;
             }
 
             if (!File.Exists(destination))
             {
-                await _media.FailImportAsync(ticket.MediaId);
+                await _media.FailImportAsync(ticket.MediaId, "yt-dlp finished without producing a file");
                 throw new InvalidOperationException($"yt-dlp did not produce '{destination}': {output}");
             }
 
@@ -391,7 +393,7 @@ public class YouTubeMediaProvider : IMediaProvider
         }
 
         if (Path.Exists(destination))
-            await _media.FailImportAsync(mediaId);
+            await _media.FailImportAsync(mediaId, "cancelled, and a partial download could not be removed");
         else
             await _media.DiscardImportAsync(mediaId);
     }

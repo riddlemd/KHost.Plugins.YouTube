@@ -565,7 +565,7 @@ public class YouTubeMediaProviderTests : IDisposable
         // same shape a real yt-dlp failure leaves behind.
         await Assert.ThrowsAsync<InvalidOperationException>(() => Enqueue(entity));
 
-        await _library.Received(1).FailImportAsync(mediaId);
+        await _library.Received(1).FailImportAsync(mediaId, Arg.Is<string?>(reason => !string.IsNullOrWhiteSpace(reason)));
         await _library.DidNotReceive().CompleteImportAsync(Arg.Any<Guid>());
     }
 
@@ -580,7 +580,7 @@ public class YouTubeMediaProviderTests : IDisposable
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => Enqueue(entity));
 
         Assert.Equal("yt-dlp exploded", exception.Message);
-        await _library.Received(1).FailImportAsync(mediaId);
+        await _library.Received(1).FailImportAsync(mediaId, Arg.Is<string?>(reason => !string.IsNullOrWhiteSpace(reason)));
         await _library.DidNotReceive().CompleteImportAsync(Arg.Any<Guid>());
     }
 
@@ -608,7 +608,7 @@ public class YouTubeMediaProviderTests : IDisposable
         _runner.Gate.SetResult("");
         await Assert.ThrowsAsync<InvalidOperationException>(() => firstCall);
 
-        await _library.Received(1).FailImportAsync(mediaId);
+        await _library.Received(1).FailImportAsync(mediaId, Arg.Is<string?>(reason => !string.IsNullOrWhiteSpace(reason)));
 
         // The finally block must have removed the ForeignKey from the in-flight set, so a third
         // call after the first settles is allowed to start its own run.
@@ -665,7 +665,7 @@ public class YouTubeMediaProviderTests : IDisposable
         Assert.True(File.Exists(unrelated));
 
         await _library.Received(1).DiscardImportAsync(mediaId);
-        await _library.DidNotReceive().FailImportAsync(Arg.Any<Guid>());
+        await _library.DidNotReceive().FailImportAsync(Arg.Any<Guid>(), Arg.Any<string?>());
         await _library.DidNotReceive().CompleteImportAsync(Arg.Any<Guid>());
 
         // The finally block must still have released the ForeignKey guard on the cancel path.
@@ -697,7 +697,7 @@ public class YouTubeMediaProviderTests : IDisposable
         await Assert.ThrowsAsync<OperationCanceledException>(() => Enqueue(entity));
 
         Assert.True(Directory.Exists(destination));
-        await _library.Received(1).FailImportAsync(mediaId);
+        await _library.Received(1).FailImportAsync(mediaId, Arg.Is<string?>(reason => !string.IsNullOrWhiteSpace(reason)));
         await _library.DidNotReceive().DiscardImportAsync(Arg.Any<Guid>());
         await _library.DidNotReceive().CompleteImportAsync(Arg.Any<Guid>());
     }

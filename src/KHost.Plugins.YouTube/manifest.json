@@ -7,7 +7,7 @@
   "description": "Search YouTube for karaoke videos.",
   "icon": "search",
   "entryAssembly": "KHost.Plugins.YouTube.dll",
-  "apiVersion": 1,
+  "apiVersion": 2,
   "settings": [
     { "key": "ytDlpPath", "type": "string", "label": "yt-dlp Path (optional — found or fetched if blank)" },
     { "key": "maxResults", "type": "int", "label": "Max Results", "default": 10 },
