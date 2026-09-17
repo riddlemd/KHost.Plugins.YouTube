@@ -41,10 +41,8 @@ public class YouTubeMediaProviderTests : IDisposable
             Directory.Delete(_mediaDirectory, recursive: true);
     }
 
-    /// <summary>
-    /// What a host picks a karaoke track on. Artist is not among them on purpose: it is parsed out
-    /// of the video title and can be wrong, while the channel is stated by YouTube.
-    /// </summary>
+    /// <summary>What a host picks a track on. Artist is not among them on purpose: it is parsed
+    /// from the video title and can be wrong, while the channel is stated by YouTube.</summary>
     [Fact]
     public void Columns_ShowThePictureTitlePublisherAndDuration()
     {
@@ -82,7 +80,7 @@ public class YouTubeMediaProviderTests : IDisposable
         var results = await _provider.SearchAsync("africa karaoke");
 
         // The channel was already being read and then thrown away in Notes, which the console
-        // never rendered — this is the information the whole column set exists to surface.
+        // never rendered: this is the information the whole column set exists to surface.
         Assert.Equal("Sing King \u2713", results[0].Fields["publisher"]);
     }
 
@@ -137,7 +135,7 @@ public class YouTubeMediaProviderTests : IDisposable
     {
         var results = await _provider.SearchAsync("africa karaoke");
 
-        // The row shows the raw title, so the parse has to travel beside it — re-running it one
+        // The row shows the raw title, so the parse has to travel beside it: re-running it one
         // row at a time on import would lose the orientation ParseAll settled across the set.
         Assert.Equal("Africa", results[0].Fields["cleanTitle"]);
     }
@@ -183,7 +181,7 @@ public class YouTubeMediaProviderTests : IDisposable
 
         var results = await _provider.SearchAsync("wonderwall");
 
-        // An empty channel must not leave a dangling " — " at the front of the note.
+        // An empty channel must not leave a dangling separator at the front of the note.
         Assert.Equal(
             "“Wonderwall Karaoke” — https://www.youtube.com/watch?v=nocnl",
             Assert.Single(results).Notes);
@@ -212,7 +210,7 @@ public class YouTubeMediaProviderTests : IDisposable
     [Fact]
     public async Task SearchAsync_ZeroDuration_LeavesItNull()
     {
-        // A live stream reports 0 rather than omitting the field, and zero renders as "0:00" —
+        // A live stream reports 0 rather than omitting the field, and zero renders as "0:00",
         // a definite-looking length for a song whose length is not known.
         _runner.Output = """{"id":"live1","title":"Karaoke live stream","channel":"c","duration":0}""";
 
@@ -531,11 +529,8 @@ public class YouTubeMediaProviderTests : IDisposable
         await _library.DidNotReceive().CompleteImportAsync(Arg.Any<Guid>());
     }
 
-    /// <summary>
-    /// The enqueue rule used to live behind the host's plugin facade; composing it here means the
-    /// no-singer case is this provider's to get right. The import still stands — the file is in the
-    /// library either way, and only the queue entry needed a singer.
-    /// </summary>
+    /// <summary>Composing enqueue here (facade removed) means the no-singer case is this
+    /// provider's to get right; the import still stands, only the queue entry needed a singer.</summary>
     [Fact]
     public async Task DownloadAndEnqueueAsync_NoSingerSelected_ImportsWithoutEnqueuing()
     {
@@ -639,11 +634,8 @@ public class YouTubeMediaProviderTests : IDisposable
         var directory = Path.GetDirectoryName(destination)!;
         Directory.CreateDirectory(directory);
 
-        // What a cancelled bv+ba download leaves behind: yt-dlp's own intermediates and a
-        // per-stream fragment file, pre-existing before the run — plus an unrelated video that
-        // must survive the sweep because it does not share this ForeignKey's prefix. Production
-        // code exits early via the "already downloaded" branch if the destination itself exists
-        // beforehand, so the destination is written by the (cancelled) run, like the happy path.
+        // Leaves .part/.ytdl and a per-stream fragment pre-existing; an unrelated video must
+        // survive the sweep (different prefix). Destination is written only by the run itself.
         File.WriteAllBytes(destination + ".part", [1]);
         File.WriteAllBytes(destination + ".ytdl", [1]);
         var fragment = Path.Combine(directory, $"{entity.ForeignKey}.f137.mp4");
@@ -683,9 +675,8 @@ public class YouTubeMediaProviderTests : IDisposable
         var directory = Path.GetDirectoryName(destination)!;
         Directory.CreateDirectory(directory);
 
-        // A directory sitting at the destination path: File.Exists reports it as absent (so the
-        // early "already downloaded" branch is not taken), but File.Delete on a directory throws,
-        // so the cleanup sweep cannot make it go away — exactly the "file remains" case.
+        // A directory sitting at the destination path: File.Exists reports it absent (so the
+        // "already downloaded" branch is skipped), but File.Delete on it throws, so cleanup cannot remove it.
         Directory.CreateDirectory(destination);
         File.WriteAllBytes(Path.Combine(destination, "stray"), [1]);
         Assert.False(File.Exists(destination));
@@ -733,7 +724,7 @@ public class YouTubeMediaProviderTests : IDisposable
         public Exception? ThrowOnRun { get; set; }
         public CancellationToken? LastToken { get; private set; }
 
-        /// <summary>Set to make a call hang until the test releases it, to simulate an in-flight download.</summary>
+        /// <summary>Set to hang a call until released, simulating an in-flight download.</summary>
         public TaskCompletionSource<string>? Gate { get; set; }
 
         /// <summary>Lines to hand the caller's onLine callback, simulating streamed yt-dlp output.</summary>

@@ -4,15 +4,8 @@ using System.Security.Cryptography;
 
 namespace KHost.Plugins.YouTube;
 
-/// <summary>
-/// Finds yt-dlp in the order a host would want it found: the path they configured, then whatever is
-/// already on the machine, then a copy this plugin fetches for itself on Windows, macOS or Linux.
-/// </summary>
-/// <remarks>
-/// Deliberately not a packaged binary. yt-dlp publishes nightly and updates itself in place, so
-/// pinning a copy inside the plugin would trade a same-day extractor fix for a plugin rebuild and a
-/// re-release — which is the failure mode yt-dlp was chosen over.
-/// </remarks>
+/// <summary>Finds yt-dlp: the configured path, then PATH, then a copy this plugin fetches itself.</summary>
+/// <remarks>Not packaged: yt-dlp updates itself, so bundling trades a same-day fix for a rebuild.</remarks>
 public sealed class YtDlpResolver
 {
     private const string LatestAssetUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download";
@@ -24,11 +17,8 @@ public sealed class YtDlpResolver
     private readonly HttpMessageHandler? _handler;
     private readonly string _asset;
 
-    /// <param name="asset">
-    /// Overrides the asset for this platform. Only a test has cause to set it: the archive build is
-    /// published for one target, and its unpacking is not code to leave unrun until a host on that
-    /// target finds out.
-    /// </param>
+    /// <param name="asset">Overrides the asset for this platform. Only a test has cause to set it: the
+    /// archive-unpack path is published for one target and must not go unrun until a host hits it.</param>
     public YtDlpResolver(
         string? configuredPath,
         string toolsDirectory,
@@ -79,7 +69,7 @@ public sealed class YtDlpResolver
                 Architecture.Arm64 => "yt-dlp_linux_aarch64",
 
                 // The one target published only as an archive, and a directory bundle rather than a
-                // single file — see Extract.
+                // single file (see Extract).
                 Architecture.Arm => "yt-dlp_linux_armv7l.zip",
 
                 _ => "yt-dlp_linux",
@@ -90,19 +80,14 @@ public sealed class YtDlpResolver
     /// <summary>What the binary is called once it is ours, whatever the asset was named.</summary>
     public static string ExecutableName => OperatingSystem.IsWindows() ? "yt-dlp.exe" : "yt-dlp";
 
-    /// <summary>
-    /// Whether this path is a copy the plugin downloaded, and so one it may update in place.
-    /// A yt-dlp installed by brew, apt or winget reports itself as a pip build and refuses
-    /// <c>-U</c>: updating that one is its package manager's job, not ours.
-    /// </summary>
+    /// <summary>Whether this path is a copy the plugin downloaded, and so one it may update.
+    /// A brew/apt/winget yt-dlp reports itself as pip and refuses <c>-U</c>, its manager's job.</summary>
     public bool OwnsCopyAt(string executablePath)
         => Path.GetFullPath(executablePath)
             .StartsWith(Path.GetFullPath(_toolsDirectory) + Path.DirectorySeparatorChar, StringComparison.Ordinal);
 
-    /// <summary>
-    /// True on musl libc, where the ordinary Linux builds will not run. The runtime identifier says
-    /// so on a musl .NET build; the loader on disk is the fallback for a portable one.
-    /// </summary>
+    /// <summary>True on musl libc, where the ordinary Linux builds will not run. The runtime
+    /// identifier says so on a musl .NET build; the loader on disk covers a portable one.</summary>
     private static bool IsMusl
         => RuntimeInformation.RuntimeIdentifier.Contains("musl", StringComparison.OrdinalIgnoreCase)
             || (Directory.Exists("/lib") && Directory.EnumerateFiles("/lib", "ld-musl-*").Any());
@@ -185,13 +170,8 @@ public sealed class YtDlpResolver
         return destination;
     }
 
-    /// <summary>
-    /// A compromised release or a broken TLS chain both look like an ordinary successful download;
-    /// the published SUMS file is the only thing that says whether the bytes on disk are the bytes
-    /// yt-dlp actually shipped. Every way of failing to confirm that — the SUMS file not fetching,
-    /// the asset having no line in it, the hash not matching — is fatal, not a silent pass-through
-    /// to executing an unverified binary.
-    /// </summary>
+    /// <summary>A compromised release looks like an ordinary download; SUMS is the only proof the
+    /// bytes on disk are what yt-dlp shipped, so any failure to confirm that is fatal, not silent.</summary>
     private static async Task VerifyChecksumAsync(
         HttpClient http, string stagedFile, string asset, CancellationToken cancellationToken)
     {
@@ -224,7 +204,7 @@ public sealed class YtDlpResolver
                 $"Downloaded '{asset}' does not match yt-dlp's published SHA-512 checksum — refusing to run it.");
     }
 
-    /// <summary>Each line is "&lt;128-hex sha512&gt;  &lt;filename&gt;"; the archive case's filename includes ".zip".</summary>
+    /// <summary>Each line is "&lt;sha512&gt; &lt;filename&gt;", the archive filename with ".zip".</summary>
     private static string? FindExpectedHash(string sums, string asset)
     {
         foreach (var line in sums.Split('\n'))
@@ -262,10 +242,8 @@ public sealed class YtDlpResolver
         }
     }
 
-    /// <summary>
-    /// Nothing sets this for us: a zip carries no Unix mode that extraction is obliged to honour, so
-    /// neither a download nor an unpack arrives executable.
-    /// </summary>
+    /// <summary>Nothing sets this for us: a zip carries no Unix mode extraction must honour, so
+    /// neither a download nor an unpack arrives executable.</summary>
     private static void MakeExecutable(string path)
     {
         if (OperatingSystem.IsWindows()) return;

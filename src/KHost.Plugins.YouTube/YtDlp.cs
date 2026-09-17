@@ -4,11 +4,8 @@ using KHost.Abstractions.Exceptions;
 
 namespace KHost.Plugins.YouTube;
 
-/// <summary>
-/// Runs yt-dlp and hands back its stdout. The seam tests use instead of a real binary. The
-/// optional callback fires once per stdout line as it arrives, letting a caller watch a download's
-/// progress rather than only seeing the output once the process exits.
-/// </summary>
+/// <summary>Runs yt-dlp and hands back its stdout; the seam tests substitute for a real binary.</summary>
+/// <remarks>The optional callback fires once per stdout line as it arrives, for progress.</remarks>
 public delegate Task<string> YtDlpRunner(
     IReadOnlyList<string> arguments, CancellationToken cancellationToken, Action<string>? onLine = null);
 
@@ -19,11 +16,8 @@ public sealed class YtDlp
 
     public YtDlp(YtDlpResolver resolver) => _resolver = resolver;
 
-    /// <summary>
-    /// What YouTube's own defences look like from here. yt-dlp keeps up with them release by
-    /// release, so a machine running an old copy sees these and a current one does not — which
-    /// makes them worth naming rather than reporting as an opaque non-zero exit.
-    /// </summary>
+    /// <summary>What YouTube's own defences look like here: signatures an old yt-dlp trips that a
+    /// current release no longer does, worth naming rather than an opaque non-zero exit.</summary>
     private static readonly string[] OutOfDateSignatures =
     [
         "HTTP Error 403",
@@ -81,7 +75,7 @@ public sealed class YtDlp
         try
         {
             // Both pipes drained at once. Reading one to the end first deadlocks as soon as the other
-            // fills its buffer — the same trap the host's ffmpeg wrapper documents.
+            // fills its buffer, the same trap the host's ffmpeg wrapper documents.
             var standardOutput = ReadLinesAsync(process.StandardOutput, onLine, cancellationToken);
             var standardError = process.StandardError.ReadToEndAsync(cancellationToken);
 

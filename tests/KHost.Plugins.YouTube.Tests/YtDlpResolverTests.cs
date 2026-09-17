@@ -136,7 +136,7 @@ public class YtDlpResolverTests : IDisposable
     [Fact]
     public async Task ResolveAsync_WhenTheChecksumsFileCannotBeFetched_LeavesNothingBehindToReuse()
     {
-        // No SUMS to check against is exactly as unsafe as a wrong one — a check that no-ops when
+        // No SUMS to check against is exactly as unsafe as a wrong one: a check that no-ops when
         // it cannot run is worthless.
         _handler.SumsMissing = true;
 
@@ -194,7 +194,7 @@ public class YtDlpResolverTests : IDisposable
         await Resolver(asset: "yt-dlp_linux_armv7l.zip").ResolveAsync();
         await Resolver(asset: "yt-dlp_linux_armv7l.zip").ResolveAsync();
 
-        // The asset plus its SUMS fetch, once — the second resolve finds the unpacked launcher already there.
+        // The asset plus its SUMS fetch, once: the second resolve finds the unpacked launcher already there.
         Assert.Equal(2, _handler.Requests.Count);
     }
 
@@ -236,7 +236,7 @@ public class YtDlpResolverTests : IDisposable
         else if (OperatingSystem.IsWindows())
             Assert.EndsWith(".exe", asset);
         else
-            // musllinux on Alpine, plain linux elsewhere — the glibc builds will not load on musl.
+            // musllinux on Alpine, plain linux elsewhere: the glibc builds will not load on musl.
             Assert.True(
                 asset.StartsWith("yt-dlp_linux", StringComparison.Ordinal)
                 || asset.StartsWith("yt-dlp_musllinux", StringComparison.Ordinal),
@@ -251,10 +251,10 @@ public class YtDlpResolverTests : IDisposable
         public Dictionary<string, string>? ZipEntries { get; set; }
         public List<string> Requests { get; } = [];
 
-        /// <summary>Filename the fake SHA2-512SUMS line credits — must match the asset under test.</summary>
+        /// <summary>Filename the fake SHA2-512SUMS line credits, must match the asset under test.</summary>
         public string Asset { get; set; } = YtDlpResolver.AssetName;
 
-        /// <summary>Wrong on purpose, to prove a download that doesn't match SUMS is rejected, not trusted.</summary>
+        /// <summary>Wrong on purpose: proves a download that fails SUMS is rejected, not trusted.</summary>
         public bool CorruptSumsHash { get; set; }
 
         /// <summary>The SUMS endpoint 404s, as if the release published none.</summary>
@@ -280,7 +280,7 @@ public class YtDlpResolverTests : IDisposable
         {
             if (SumsMissing) return new HttpResponseMessage(HttpStatusCode.NotFound);
 
-            // The real bytes the asset request below will serve — the SUMS line has to match them,
+            // The real bytes the asset request below will serve: the SUMS line has to match them,
             // or every test would be exercising the mismatch path instead of the happy one.
             var bytes = ZipEntries is not null ? BuildZip(ZipEntries) : Encoding.UTF8.GetBytes(Body ?? "");
 
@@ -311,7 +311,7 @@ public class YtDlpResolverTests : IDisposable
         }
     }
 
-    /// <summary>Hands over a few bytes, then drops — a download interrupted, not one refused.</summary>
+    /// <summary>Hands over a few bytes, then drops: a download interrupted, not one refused.</summary>
     private sealed class TruncatingStream : Stream
     {
         private bool _served;

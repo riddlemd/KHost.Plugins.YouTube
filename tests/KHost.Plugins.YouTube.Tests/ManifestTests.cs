@@ -4,12 +4,8 @@ using System.Text.Json;
 
 namespace KHost.Plugins.YouTube.Tests;
 
-/// <summary>
-/// The manifest is read by the host and by nothing in this assembly, so a setting the SDK cannot
-/// parse costs nothing at build time and everything at load time: the plugin does not register and
-/// the only report is a row on the Plugins page. The type names are the SDK enum's — "int", not
-/// "number". This is the check behind <see cref="YouTubeSettings"/>'s "keep the two in sync".
-/// </summary>
+/// <summary>The manifest is read by the host, not this assembly, so an unparseable setting fails
+/// silently at load time, not build time: no row for the plugin, see <see cref="YouTubeSettings"/>.</summary>
 public class ManifestTests
 {
     private const string PluginManifestFileName = "manifest.json";
