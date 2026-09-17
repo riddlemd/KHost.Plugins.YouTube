@@ -5,10 +5,7 @@ namespace KHost.Plugins.YouTube;
 /// <summary>Picks the still a search result is shown with.</summary>
 public static class YouTubeThumbnails
 {
-    /// <summary>
-    /// The console draws these small. Anything larger is bytes a host waits on for a picture they
-    /// are scanning, not studying, so the narrowest one that still covers the cell wins.
-    /// </summary>
+    /// <summary>Drawn small: bytes here are for a glance, not a study, so the narrowest cover wins.</summary>
     private const int TargetWidth = 360;
 
     /// <summary>Empty when the result carries no usable image, which leaves the cell blank.</summary>

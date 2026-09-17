@@ -16,10 +16,8 @@ public class YtDlpProgressParserTests
     [Fact]
     public void Parse_SoloDownload_NeverSeesASecondDestination_CapsAtTheHalfwayPointRatherThanGoingBackwards()
     {
-        // The /b fallback (single format, no merge) logs one Destination line and one 0->100 pass.
-        // The parser alone cannot tell in advance that no second stream is coming, so it stays
-        // conservative and never exceeds 0.5 here — DownloadAndEnqueueAsync reports the real 1.0
-        // itself once the file is confirmed on disk.
+        // The /b fallback logs one Destination line and one 0->100 pass; the parser cannot tell
+        // a second stream isn't coming, so it caps at 0.5 here; the real 1.0 comes later.
         var (destinationsSeen, _) = YtDlpProgressParser.Parse(0, "[download] Destination: video.mp4");
         (_, var fraction) = YtDlpProgressParser.Parse(destinationsSeen, "[download] 100% of 20.00MiB in 00:08");
 
@@ -42,8 +40,7 @@ public class YtDlpProgressParserTests
     public void Parse_TwoStreamSequence_TheBoundaryIsContinuousNotBackwards()
     {
         // The video stream (destination 1) finishing at 100% and the audio stream (destination 2)
-        // immediately starting at 0% must land on the same fraction — that is the whole point of
-        // the 0.5 split.
+        // immediately starting at 0% must land on the same fraction: the whole point of the 0.5 split.
         var (afterDestination1, _) = YtDlpProgressParser.Parse(0, "[download] Destination: video.f137.mp4");
         var (_, videoEnd) = YtDlpProgressParser.Parse(afterDestination1, "[download] 100% of 50.00MiB in 00:10");
         var (afterDestination2, _) = YtDlpProgressParser.Parse(afterDestination1, "[download] Destination: audio.f140.m4a");

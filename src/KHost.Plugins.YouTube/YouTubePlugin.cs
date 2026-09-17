@@ -3,10 +3,8 @@ using Microsoft.Extensions.Logging;
 
 namespace KHost.Plugins.YouTube;
 
-/// <summary>
-/// Settles yt-dlp before the first search rather than during it: resolving it may mean a 35MB
-/// download, and the host who triggers that should not be the one waiting on it mid-shift.
-/// </summary>
+/// <summary>Settles yt-dlp before the first search rather than during it: resolving it may mean
+/// a 35MB download, and the host who triggers that should not be the one waiting mid-shift.</summary>
 public sealed class YouTubePlugin : IPlugin
 {
     private const string SlowOnMacOs =
@@ -28,15 +26,14 @@ public sealed class YouTubePlugin : IPlugin
             Path.Combine(AppContext.BaseDirectory, "cache", "tools"));
 
         // Started, not awaited: a first run fetches 35MB, and startup is a window the host is
-        // watching. Nothing else waits on this — a search resolves yt-dlp for itself either way.
+        // watching. Nothing else waits on this, since a search resolves yt-dlp for itself either way.
         _ = Task.Run(() => PrepareAsync(resolver, settings, context, _logger), CancellationToken.None);
 
         return Task.CompletedTask;
     }
 
-    // Internal, not private: the branch logic here — what warning a host is shown when yt-dlp is
-    // missing, provided, or a downloaded copy — is the part worth a test, and InitializeAsync only
-    // ever fires it on a background task nothing can await.
+    // Internal, not private: what warning a host is shown (missing, provided, or downloaded)
+    // is the branch worth a test, and InitializeAsync only fires it on a task nothing can await.
     internal static async Task PrepareAsync(
         YtDlpResolver resolver, YouTubeSettings settings, IPluginContext context, ILogger logger)
     {

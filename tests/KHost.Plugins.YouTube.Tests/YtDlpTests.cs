@@ -18,15 +18,12 @@ public class YtDlpTests : IDisposable
         catch (UnauthorizedAccessException) { }
     }
 
-    /// <summary>
-    /// Stands in for yt-dlp. A real child process is the point of these tests — what the wrapper
-    /// does to one is the whole behaviour — so the process layer cannot be substituted away, and
-    /// each platform gets the shell it actually has.
-    /// </summary>
+    /// <summary>Stands in for yt-dlp. A real child process is the point of these tests, so the
+    /// process layer cannot be substituted away, and each platform gets the shell it actually has.</summary>
     private static class Stub
     {
         // Absolute, because the resolver takes a configured path and rejects one it cannot see on
-        // disk — a bare "cmd.exe" resolves against the working directory and is not found.
+        // disk: a bare "cmd.exe" resolves against the working directory and is not found.
         private static readonly string Cmd =
             Path.Combine(Environment.SystemDirectory, "cmd.exe");
 
@@ -45,10 +42,8 @@ public class YtDlpTests : IDisposable
                 ? (PowerShell, ["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
                 : ("/bin/sleep", ["30"]);
 
-        /// <summary>
-        /// Sleeps in a grandchild and reports its id, mirroring yt-dlp spawning ffmpeg: killing
-        /// only the top process leaves that one running and still writing its output file.
-        /// </summary>
+        /// <summary>Sleeps in a grandchild and reports its id, mirroring yt-dlp spawning ffmpeg:
+        /// killing only the top process leaves that one running and still writing its output.</summary>
         public static (string Executable, string[] Arguments) SleepInAChild(string pidFile) =>
             OperatingSystem.IsWindows()
                 ? (PowerShell,

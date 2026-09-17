@@ -3,32 +3,21 @@ using System.Text.RegularExpressions;
 
 namespace KHost.Plugins.YouTube;
 
-/// <summary>
-/// Splits a YouTube video title into a song title and, where the title carries one, an artist.
-/// Karaoke channels bury the artist inside decoration ("(In the Style of X)") as often as they use
-/// YouTube's own "Artist - Title" convention, so both shapes have to be tried.
-/// </summary>
+/// <summary>Splits a YouTube title into a song title and artist from known conventions.</summary>
 public static class YouTubeTitleParser
 {
     private const RegexOptions Options = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant;
 
-    // Junk vocabulary shared between the bracket-stripper and the bare-trailing-word stripper.
-    // "cc" (closed-captions marker, e.g. "[CC]") is common on the "CC Karaoke" channels' bracket
-    // decoration; \b guards it so it never matches as a substring of a real word.
+    // Shared by the bracket and trailing-word strippers; \b guards "cc" so it never matches inside a
+    // real word (YouTube's [CC] closed-caption marker).
     private const string JunkVocabulary =
         @"karaoke(?:\s+version)?|instrumental|lyric\s+video|lyrics?|with\s+lyrics|lyrics\s+on\s+screen|"
         + @"backing\s+track|official\s+(?:video|audio|music\s+video)|hd|hq|4k|\d{3,4}p(?:\d{2})?|"
         + @"sing\s+along|minus\s+one|"
         + @"no\s+lead\s+vocal|guide\s+vocal|\bcc\b";
 
-    // Corpus-derived (spikes/title-parse-corpus): for each channel with >=5 graded spaced-dash rows,
-    // >=90% of those rows use "Title - Artist" rather than "Artist - Title". This is an empirical,
-    // overfit-prone list scoped to the 500-song corpus — a real channel using this house style but
-    // absent (or under-sampled) here will still parse backwards until it earns its own entry.
-    // "Piano Karaoke" is deliberately omitted despite qualifying: as a Contains() substring it would
-    // also match "Sing2Piano | Piano Karaoke Instrumentals" and "KaraoKeysPH | Piano Karaoke
-    // Instrumentals", and the Sing2Piano channel is Artist-first (opposite convention) — the
-    // substring can't tell the three apart, so including it would flip ~29 already-correct rows.
+    // Corpus-derived: channels here use "Title - Artist" on >=90% of graded rows; an absent channel
+    // parses backwards until added. "Piano Karaoke" stays out; it also substring-matches Sing2Piano.
     private static readonly string[] TitleFirstChannels =
     [
         "karafun", "easykaraoke", "edkara", "mrentertainerkaraoke", "acoustic lounge",
@@ -36,17 +25,13 @@ public static class YouTubeTitleParser
         "karaokejp", "mic magic karaoke",
     ];
 
-    // First match wins, so the more specific "X by Y" pattern is tried only when nothing that names
-    // the segment explicitly ("in the style of", etc.) has already claimed the artist. TitleGroup is
-    // null for the bracket carriers — there is no title text inside them, just decoration to drop —
-    // and set for the quoted-title carrier, whose match spans the title text too and must keep it.
+    // First match wins, so the specific "X by Y" pattern runs only once nothing named the artist.
+    // TitleGroup is null for bracket carriers (decoration only); set when the match spans title text too.
     private static readonly (Regex Pattern, int ArtistGroup, int? TitleGroup)[] ArtistCarriers =
     [
         (new Regex(@"[\(\[]\s*in\s+the\s+style\s+of\s+([^\)\]]+?)\s*[\)\]]", Options), 1, null),
-        // Stingray Karaoke's house style: no enclosing brackets at all, just the artist name quoted
-        // ("Paint It Black in the Style of "The Rolling Stones" karaoke with lyrics"). Requiring the
-        // quotes is what tells this apart from the ~4 corpus rows that say "in the style of Artist"
-        // with no quotes and no delimiter before the trailing junk — those stay unrecoverable.
+        // Stingray Karaoke quotes the artist with no enclosing brackets ("...in the Style of "Artist"...").
+        // Requiring the quotes separates it from unquoted "in the style of Artist" rows, left unrecoverable.
         (new Regex("""in\s+the\s+style\s+of\s+["“]([^"”]+)["”]""", Options), 1, null),
         (new Regex(@"[\(\[]\s*originally\s+performed\s+by\s+([^\)\]]+?)\s*[\)\]]", Options), 1, null),
         (new Regex(@"[\(\[]\s*made\s+popular\s+by\s+([^\)\]]+?)\s*[\)\]]", Options), 1, null),
@@ -54,69 +39,51 @@ public static class YouTubeTitleParser
         (new Regex("""["“]([^"”]+)["”]\s+by\s+([^\(\)\[\]|]+)""", Options), 2, 1),
     ];
 
-    // A bracket can carry more than one junk phrase, joined by "with" ("Karaoke with Lyrics"), by
-    // another connector ("CC Karaoke / Instrumental"), or by nothing at all ("HD Karaoke",
-    // "Karaoke Instrumental") — the connector between chained phrases is optional, not just "with".
+    // A bracket can chain multiple junk phrases via "with", another connector, or nothing at all
+    // ("HD Karaoke Instrumental"); the connector between phrases is optional, not just "with".
     private const string JunkConnector = @"\s*(?:with|and|&|/|,)?\s*";
 
     private static readonly Regex BracketedJunk = new(
         $@"[\(\[]\s*(?:{JunkVocabulary})(?:{JunkConnector}(?:{JunkVocabulary}))*\s*[\)\]]", Options);
 
-    // A bracket can also pair a junk phrase with a genuine, non-junk qualifier via "with"
-    // ("Karaoke Version with Harmony") — BracketedJunk above requires the WHOLE bracket to reduce to
-    // junk and leaves this untouched. The whole bracket is dropped rather than kept-minus-the-junk-
-    // word: "with Harmony" alone is still decoration text the grader (and a host) has no use for, not
-    // a title/artist fragment worth preserving on its own.
+    // BracketedJunk above requires the WHOLE bracket to reduce to junk, leaving a mixed bracket like
+    // "(Karaoke Version with Harmony)" untouched; this drops the bracket instead of keeping "with Harmony".
     private static readonly Regex MixedJunkBracket = new(
         $@"[\(\[]\s*(?:{JunkVocabulary})(?:{JunkConnector}(?:{JunkVocabulary}))*\s+with\s+[^()\[\]]+?\s*[\)\]]"
         + $@"|[\(\[]\s*[^()\[\]]+?\s+with\s+(?:{JunkVocabulary})(?:{JunkConnector}(?:{JunkVocabulary}))*\s*[\)\]]",
         Options);
 
-    // Peels one trailing junk phrase at a time (looped in StripTrailingJunkChain), so a run like
-    // "- Karaoke Instrumental Lyrics" comes off word by word. The connector is optional so a bare
-    // junk phrase with nothing before it (the whole title is junk) still matches.
+    // Peels one trailing junk phrase at a time (looped in StripTrailingJunkChain), so a chain like
+    // "- Karaoke Instrumental Lyrics" comes off word by word; the connector is optional for a bare match.
     private static readonly Regex TrailingJunkLink = new(
         $@"(?:\s*[-–—&|])?\s*(?:with\s+)?(?:{JunkVocabulary})\s*$", Options);
 
-    // A channel signs its own decoration, and the branding is not itself junk vocabulary, so the
-    // chain above stops the moment it reaches one: "Karaoke Version from Zoom Karaoke" peeled the
-    // final "Karaoke" and left "- Karaoke Version from Zoom" sitting in 128 corpus titles. Anything
-    // after "from" is the signature, so the whole tail goes — but only when a junk phrase introduced
-    // it, which is what keeps a real title like "Message from the Fireflies" intact.
+    // Channel branding after "from" is not junk vocabulary, so the chain above stops short of it.
+    // This drops the "from X" tail only when a junk phrase introduces it, leaving a real title intact.
     private static readonly Regex TrailingBranding = new(
         $@"(?:\s*[-–—&|])?\s*(?:with\s+)?(?:{JunkVocabulary})(?:{JunkConnector}(?:{JunkVocabulary}))*"
         + @"\s+from\s+[^-–—|\(\)\[\]]+$", Options);
 
-    // Decoration fenced by emoji or a bracketed tag rather than by a separator ("🎤HQ Karaoke🎤",
-    // "[UVR]") — the fence is not a character the chain treats as a connector, so it never matched.
-    // The surrogate-pair alternative is required: .NET matches \p{So} per UTF-16 unit, so it does
-    // not match an emoji above the BMP — 🎤 is two units and slips straight past a bare \p{So}.
+    // Decoration fenced by emoji or a bracketed tag ("🎤HQ Karaoke🎤", "[UVR]") is not a connector the
+    // chain above matches. The surrogate-pair alternative covers emoji \p{So} misses above the BMP.
     private const string Fence = @"(?:\p{So}|[\uD800-\uDBFF][\uDC00-\uDFFF]|[\[\]])";
 
     private static readonly Regex TrailingFencedJunk = new(
         $@"\s*{Fence}\s*(?:{JunkVocabulary})(?:{JunkConnector}(?:{JunkVocabulary}))*\s*{Fence}?\s*$",
         Options);
 
-    // A whole segment counts as junk only when EVERY word in it is junk vocabulary (chained the same
-    // way BracketedJunk chains a bracket's contents) — not merely because "karaoke" appears somewhere
-    // in it. The old bare "karaoke" alternative matched real content too ("The Steve Miller Band
-    // Karaoke Version" is an artist name, not decoration) and silently deleted it.
+    // A segment is junk only when EVERY word in it is junk vocabulary, not merely because "karaoke"
+    // appears somewhere in it, or "The Steve Miller Band Karaoke Version" would be deleted too.
     private static readonly Regex PipeSegmentJunk = new(
         $@"^(?:{JunkVocabulary})(?:{JunkConnector}(?:{JunkVocabulary}))*$", Options);
 
-    // Corpus-derived, same method as TitleFirstChannels but for the two-pipe-segment case
-    // ("Title Karaoke | Artist Karaoke Version") — a channel can use one convention for its "-"
-    // titles and the other for its "|" titles (Vocal Star Karaoke's dash rows are Artist-first; its
-    // pipe rows are Title-first), so this is deliberately a separate list, not a reuse of the other.
+    // Separate list from TitleFirstChannels on purpose: a channel can use one convention for "-"
+    // titles and the other for "|" titles (Vocal Star Karaoke's dash rows are Artist-first, pipe rows not).
     private static readonly string[] PipeTitleFirstChannels =
         ["theo's music", "vocal star karaoke", "sing2piano"];
 
     // Matches only the LAST " - "-delimited segment: the character class excludes dash chars, so an
-    // earlier dash in the string makes that starting position fail and the engine advances to the
-    // final one instead.
-    // "•" and "·" are a fourth separator convention (the "CC Karaoke" channels' "Artist • Title"),
-    // alongside -/en-dash/em-dash — always space-delimited in the corpus, never fused to a word, so
-    // no word-boundary guard is needed the way one might be for a mid-word middle dot.
+    // earlier dash fails and the engine advances to the final one. "•"/"·" need no word-boundary guard.
     private static readonly Regex TrailingDashSegment = new(@"\s[-–—•·]\s(?<seg>[^-–—•·]+)$", Options);
 
     private static readonly Regex SpacedDashSplit = new(@"^(.+?)\s[-–—•·]\s(.+)$", Options);
@@ -129,7 +96,7 @@ public static class YouTubeTitleParser
         /// <summary>No artist found.</summary>
         None,
 
-        /// <summary>The title named it ("in the style of X", a pipe segment, a title-first channel).</summary>
+        /// <summary>The title named it: a stated carrier, a pipe segment, or a title-first channel.</summary>
         Stated,
 
         /// <summary>Split on a dash and assumed Artist-first. A coin toss on an unknown channel.</summary>
@@ -142,12 +109,8 @@ public static class YouTubeTitleParser
         return (title, artist);
     }
 
-    /// <summary>
-    /// Parses every result of one search together. A search is for a single song, so a result whose
-    /// title states the artist outright settles the orientation for the ones that only have a dash
-    /// to go on — 104 of the 105 corpus songs with a swap have the swapped rows in the minority, so
-    /// an anchor is nearly always present and is better evidence than any channel list.
-    /// </summary>
+    /// <summary>Parses every result of one search together, so a title stating the artist outright
+    /// settles the orientation for rows that only have a dash to go on.</summary>
     public static IReadOnlyList<(string Title, string Artist)> ParseAll(
         IReadOnlyList<(string RawTitle, string ChannelName)> results)
     {
@@ -160,10 +123,8 @@ public static class YouTubeTitleParser
 
         var anchors = new HashSet<string>(stated, StringComparer.Ordinal);
 
-        // With no stated anchor, the set votes. Every result is the same song by the same artist, so
-        // the name landing in the artist slot most often is the one the majority of channels agree
-        // on — and a channel that reverses the convention is, by the corpus, always the minority.
-        // Two occurrences is the floor: a single row agreeing with itself is not evidence.
+        // With no stated anchor, the set votes: the name landing in the artist slot most often is the
+        // one most channels agree on. Two occurrences is the floor; one row agreeing is not evidence.
         var modal = parsed
             .Where(p => p.Artist.Length > 0)
             .GroupBy(p => Fold(p.Artist), StringComparer.Ordinal)
@@ -185,13 +146,8 @@ public static class YouTubeTitleParser
         ];
     }
 
-    /// <summary>
-    /// A guessed row is backwards when the name it put in the title is one the set knows as an
-    /// artist, and its own artist is not. Stated and modal anchors carry equal weight on purpose:
-    /// ranking stated above the vote scored worse on the corpus (69 swapped rows against 55),
-    /// because a carrier can match the wrong span and one bad statement then overrides a correct
-    /// majority.
-    /// </summary>
+    /// <summary>A guessed row is backwards if its title is a known artist and its artist is not.</summary>
+    /// <remarks>Stated and modal anchors weigh equally; ranking stated above the vote scored worse.</remarks>
     private static bool ShouldSwap(
         (string Title, string Artist, ArtistSource Source) parsed,
         IReadOnlySet<string> anchors)
@@ -232,7 +188,7 @@ public static class YouTubeTitleParser
             artist = Tidy(match.Groups[artistGroup].Value);
 
             // A trailing space keeps the surviving text off whatever follows the match (a junk
-            // bracket, say) — without it "Rhapsody" and "(Karaoke...)" would fuse into one word.
+            // bracket, say); without it "Rhapsody" and "(Karaoke...)" would fuse into one word.
             var replacement = titleGroup is int group ? match.Groups[group].Value + " " : " ";
             working = working[..match.Index] + replacement + working[(match.Index + match.Length)..];
             break;
@@ -297,18 +253,14 @@ public static class YouTubeTitleParser
                 .Where(segment => segment.Length > 0 && !IsPipeSegmentJunkOrChannelPromo(segment, channelName))
                 .ToList();
 
-            // Drop channel-overlap segments only when something survives — erasing the sole survivor
+            // Drop channel-overlap segments only when something survives. Erasing the sole survivor
             // for overlapping the channel would erase the whole title, not just decoration.
             var withoutChannel = segments.Where(segment => !OverlapsChannel(segment, channelName)).ToList();
             if (withoutChannel.Count > 0)
                 segments = withoutChannel;
 
-            // A segment can carry real content plus a trailing junk suffix of its own ("The Joker
-            // Karaoke", "The Steve Miller Band Karaoke Version") rather than being pure junk outright
-            // — peel that per segment, same as the trailing-junk chain applied to the title as a whole.
-            // A segment can carry real content plus a trailing junk suffix of its own ("The Joker
-            // Karaoke", "The Steve Miller Band Karaoke Version") rather than being pure junk outright
-            // — peel that per segment, same as the trailing-junk chain applied to the title as a whole.
+            // A segment can carry real content plus its own trailing junk suffix ("The Joker Karaoke")
+            // rather than being pure junk outright; peel that per segment, same as the whole title.
             segments = segments
                 .Select(segment => StripTrailingJunkChain(segment).Trim())
                 .Where(segment => segment.Length > 0)
@@ -321,16 +273,15 @@ public static class YouTubeTitleParser
 
                 if (titleFirst)
                 {
-                    // "Title Karaoke | Artist Karaoke Version" — Vocal Star Karaoke's and Sing2Piano's
+                    // "Title Karaoke | Artist Karaoke Version" is Vocal Star Karaoke's and Sing2Piano's
                     // house style, the reverse of YouTube's own "Artist | Title" convention below.
                     working = segments[0];
                     pipeArtist = segments[1];
                 }
                 else
                 {
-                    // No named carrier claimed the artist, and only two pipe segments are left:
-                    // YouTube's own "Artist | Title" convention, distinct from the spaced-dash
-                    // "Title - Artist" convention.
+                    // No named carrier claimed the artist and only two pipe segments remain: this is
+                    // YouTube's own "Artist | Title" convention, distinct from the spaced-dash one.
                     pipeArtist = segments[0];
                     working = segments[1];
                 }
@@ -384,11 +335,8 @@ public static class YouTubeTitleParser
         return working;
     }
 
-    // A pipe segment can also be channel self-promotion built AROUND the channel name rather than
-    // matching it outright — "With Lyrics HD Vocal-Star Karaoke 4K" for channel "Vocal Star Karaoke"
-    // (note the hyphen the channel's own branding uses in place of a space). Strip the channel name
-    // out (hyphen/space folded together) and check whether everything left is junk vocabulary; a
-    // segment that's genuine content (an artist name, say) won't reduce to nothing but junk this way.
+    // A pipe segment can be channel self-promotion built AROUND the channel name rather than matching
+    // it outright ("Vocal-Star Karaoke" for "Vocal Star Karaoke"); fold hyphen/space before the check.
     private static bool IsPipeSegmentJunkOrChannelPromo(string segment, string channelName)
     {
         if (PipeSegmentJunk.IsMatch(segment))
@@ -417,13 +365,8 @@ public static class YouTubeTitleParser
         if (channelName.Contains(segment, StringComparison.OrdinalIgnoreCase))
             return true;
 
-        // A segment mentioning the channel name is (near enough, in the corpus) always the channel's
-        // own trailing credit ("NOX Karaoke (with background vocals)", "Zoom Karaoke Official"), even
-        // with real decoration text stuck to it — a tighter length-based cutoff was tried here to stop
-        // a "•"-delimited bracket like "(CC Karaoke / Instrumental)" from swallowing the song title,
-        // but BracketedJunk/MixedJunkBracket now strip that bracket before this ever runs (both "cc"
-        // and "karaoke" are junk vocabulary), so the cutoff was left blocking legitimate credit
-        // segments for no remaining benefit — corpus-measured net negative once removed.
+        // A segment mentioning the channel name is, in the corpus, always the channel's own trailing
+        // credit ("NOX Karaoke (with background vocals)"), so no length cutoff is needed here.
         return segment.Contains(channelName, StringComparison.OrdinalIgnoreCase);
     }
 

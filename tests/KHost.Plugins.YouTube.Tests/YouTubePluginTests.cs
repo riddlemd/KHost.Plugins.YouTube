@@ -3,12 +3,8 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 namespace KHost.Plugins.YouTube.Tests;
 
-/// <summary>
-/// The plugin's startup decides what a host is told about yt-dlp — nothing, a "could not be
-/// prepared" line, or the macOS-is-slow advice. That logic lives in PrepareAsync because
-/// InitializeAsync only ever runs it on a background task nothing can await. Every branch here is
-/// driven through a configured path, so the resolver never touches PATH or the network.
-/// </summary>
+/// <summary>PrepareAsync carries the startup branch logic since InitializeAsync only runs it on
+/// a background task nothing can await; every branch here uses a configured path, no PATH or net.</summary>
 public class YouTubePluginTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), $"khost-ytplugin-{Guid.NewGuid():N}");
@@ -20,7 +16,7 @@ public class YouTubePluginTests : IDisposable
     public async Task PrepareAsync_YtDlpCannotBeResolved_WarnsItCouldNotBePrepared()
     {
         // A configured path that does not exist is an error the resolver raises rather than quietly
-        // downloading over — the plugin turns it into a line the host can act on.
+        // downloading over, and the plugin turns it into a line the host can act on.
         var resolver = new YtDlpResolver(configuredPath: Path.Combine(_dir, "missing"), toolsDirectory: _dir);
 
         await YouTubePlugin.PrepareAsync(resolver, new YouTubeSettings(), _context, NullLogger<YouTubePlugin>.Instance);

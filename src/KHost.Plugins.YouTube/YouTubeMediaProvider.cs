@@ -20,10 +20,8 @@ public class YouTubeMediaProvider : IMediaProvider
     private readonly YouTubeSettings _settings;
     private readonly YtDlpRunner _run;
 
-    // The provider is a singleton and a host on slow venue internet will click Enqueue twice
-    // before the first download finishes; this stops the second click from starting a duplicate
-    // yt-dlp process or a duplicate queue entry. BeginImportAsync's own idempotency only protects
-    // the DB row, not the in-flight process.
+    // A host on slow venue internet can click Enqueue twice before the first download finishes;
+    // this stops a duplicate yt-dlp process, which BeginImportAsync's DB idempotency does not.
     private readonly ConcurrentDictionary<string, byte> _downloadsInFlight = new();
 
     // Every parameter past the context comes from the host's own container: the loader builds
@@ -75,10 +73,8 @@ public class YouTubeMediaProvider : IMediaProvider
     private const string ThumbnailKey = "thumbnail";
     private const string PublisherKey = "publisher";
 
-    /// <summary>
-    /// Not a column — no <see cref="MediaResultColumn"/> names it, so nothing renders it. It rides
-    /// along on the row so the import can write the parsed title while the list shows the raw one.
-    /// </summary>
+    /// <summary>Not a column: no <see cref="MediaResultColumn"/> names it, so nothing renders it.
+    /// It rides on the row so import can write the parsed title while the list shows the raw one.</summary>
     private const string CleanTitleKey = "cleanTitle";
 
     /// <summary>YouTube's own verified tick, which its karaoke channels of any size carry.</summary>
@@ -90,11 +86,8 @@ public class YouTubeMediaProvider : IMediaProvider
 
     public IEnumerable<MediaProviderAction> Actions { get; }
 
-    /// <summary>
-    /// What a host actually picks a karaoke track on. Artist is deliberately not among them: it is
-    /// parsed out of the video title and can be wrong, while the channel is stated by YouTube and
-    /// is the real answer to "is this a proper karaoke track or somebody's phone recording".
-    /// </summary>
+    /// <summary>What a host picks a track on. Artist is deliberately absent: it is parsed from
+    /// the title and can be wrong, while the channel says whether this is a real karaoke upload.</summary>
     public IReadOnlyList<MediaResultColumn> Columns =>
     [
         new() { Key = ThumbnailKey, Header = "", Kind = MediaResultColumnKind.Thumbnail, Essential = false },
@@ -189,10 +182,8 @@ public class YouTubeMediaProvider : IMediaProvider
         ];
     }
 
-    /// <summary>
-    /// Channel name, the raw video title whenever the parse changed it, and the watch URL. The
-    /// library row keeps the parsed title, so this is the only record of what it came from.
-    /// </summary>
+    /// <summary>Channel name, the raw title whenever the parse changed it, and the watch URL.
+    /// The library row keeps the parsed title, so this is the only record of what it came from.</summary>
     private static string BuildNotes(string channelName, string rawTitle, string parsedTitle, string videoId)
     {
         var parts = new List<string>(3);
@@ -210,7 +201,7 @@ public class YouTubeMediaProvider : IMediaProvider
 
     private static string WatchUrl(string videoId) => $"https://www.youtube.com/watch?v={videoId}";
 
-    /// <summary>Seconds, and null for anything without a real one — a live stream reports none.</summary>
+    /// <summary>Seconds, null for anything without a real one: a live stream reports none.</summary>
     private static TimeSpan? ReadDuration(JsonElement root)
     {
         if (!root.TryGetProperty("duration", out var duration)) return null;
@@ -293,8 +284,7 @@ public class YouTubeMediaProvider : IMediaProvider
         try
         {
             // Enqueue immediately, before the download runs, so the singer's queue shows the
-            // Downloading spinner row the moment the host clicks — not minutes later on slow
-            // venue internet.
+            // Downloading spinner row the moment the host clicks, not minutes later on slow venue internet.
             var ticket = await _media.BeginImportAsync(request);
             await EnqueueForSelectedSingerAsync(ticket.MediaId);
 
@@ -355,11 +345,8 @@ public class YouTubeMediaProvider : IMediaProvider
         }
     }
 
-    /// <summary>
-    /// Fire-and-forget from a synchronous callback: the exception is caught here rather than left
-    /// to surface as an unobserved task, since a progress update failing must never take the
-    /// download itself down with it.
-    /// </summary>
+    /// <summary>Fire-and-forget from a synchronous callback: caught here rather than left to
+    /// surface unobserved, since a failed progress update must never take the download down too.</summary>
     private async Task ReportProgressSafelyAsync(Guid mediaId, double fraction)
     {
         try
@@ -372,15 +359,8 @@ public class YouTubeMediaProvider : IMediaProvider
         }
     }
 
-    /// <summary>
-    /// A cancelled download can leave the destination plus yt-dlp's own intermediates (.part,
-    /// .ytdl) and, in bv+ba mode, per-stream fragment files — all named "{foreignKey}.*" in the
-    /// plugin-owned directory, so a prefix sweep catches every one of them in one pass.
-    /// EnumerateFileSystemEntries (not EnumerateFiles) so a same-named directory is attempted too
-    /// rather than silently skipped. Only once nothing survives at the destination path is the row
-    /// safe to discard — Path.Exists, not File.Exists, so a leftover directory still routes to
-    /// FailImportAsync instead of being reported as gone.
-    /// </summary>
+    /// <summary>A cancelled download leaves .part/.ytdl and (bv+ba) per-stream fragments, all
+    /// "{foreignKey}.*"; Path.Exists (not File.Exists) routes a leftover dir to FailImportAsync.</summary>
     private async Task CleanUpAfterCancelAsync(string directory, string foreignKey, string destination, Guid mediaId)
     {
         if (Directory.Exists(directory))
