@@ -9,8 +9,8 @@
   "entryAssembly": "KHost.Plugins.YouTube.dll",
   "apiVersion": 3,
   "settings": [
-    { "key": "ytDlpPath", "type": "string", "label": "yt-dlp Path (optional — found or fetched if blank)" },
-    { "key": "maxResults", "type": "int", "label": "Max Results", "default": 10 },
-    { "key": "autoUpdate", "type": "bool", "label": "Keep the downloaded yt-dlp up to date", "default": true }
+    { "key": "maxResults", "type": "int", "section": "Search", "label": "Max Results", "default": 10 },
+    { "key": "ytDlpPath", "type": "string", "section": "yt-dlp", "label": "yt-dlp Path (optional — found or fetched if blank)" },
+    { "key": "autoUpdate", "type": "bool", "section": "yt-dlp", "label": "Keep the downloaded yt-dlp up to date", "default": true }
   ]
 }
