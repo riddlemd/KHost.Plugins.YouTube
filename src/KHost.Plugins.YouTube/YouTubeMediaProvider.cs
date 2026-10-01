@@ -1,3 +1,4 @@
+using KHost.Abstractions.Exceptions;
 using KHost.Abstractions.Models;
 using KHost.Abstractions.Services;
 using Microsoft.Extensions.Logging;
@@ -17,12 +18,17 @@ public class YouTubeMediaProvider : IMediaProvider
     private readonly ISingerQueueService _queue;
     private readonly IPerformanceService _performances;
     private readonly ILogger<YouTubeMediaProvider> _logger;
+    private readonly IFlashService _flash;
     private readonly YouTubeSettings _settings;
     private readonly YtDlpRunner _run;
 
     // A host on slow venue internet can click Enqueue twice before the first download finishes;
     // this stops a duplicate yt-dlp process, which BeginImportAsync's DB idempotency does not.
     private readonly ConcurrentDictionary<string, byte> _downloadsInFlight = new();
+
+    // What SearchAsync last flashed, so a search that keeps failing the same way (every keystroke
+    // on slow typing) does not restack the same message; null once a search succeeds again.
+    private string? _lastSearchFailureFlash;
 
     // Every parameter past the context comes from the host's own container: the loader builds
     // providers with ActivatorUtilities, so there is no facade to go through for them.
@@ -31,8 +37,9 @@ public class YouTubeMediaProvider : IMediaProvider
         IMediaAcquisitionService media,
         ISingerQueueService queue,
         IPerformanceService performances,
-        ILogger<YouTubeMediaProvider> logger)
-        : this(plugin, media, queue, performances, logger, BuildRunner(plugin))
+        ILogger<YouTubeMediaProvider> logger,
+        IFlashService flash)
+        : this(plugin, media, queue, performances, logger, flash, BuildRunner(plugin))
     {
     }
 
@@ -42,6 +49,7 @@ public class YouTubeMediaProvider : IMediaProvider
         ISingerQueueService queue,
         IPerformanceService performances,
         ILogger<YouTubeMediaProvider> logger,
+        IFlashService flash,
         YtDlpRunner run)
     {
         _plugin = plugin;
@@ -49,6 +57,7 @@ public class YouTubeMediaProvider : IMediaProvider
         _queue = queue;
         _performances = performances;
         _logger = logger;
+        _flash = flash;
         _settings = plugin.BindSettings<YouTubeSettings>();
         _run = run;
 
@@ -107,18 +116,56 @@ public class YouTubeMediaProvider : IMediaProvider
 
         var count = Math.Clamp(pageSize > 0 ? pageSize : _settings.MaxResults, 1, MaxAllowedResults);
 
-        // --flat-playlist keeps this to the search response itself. Without it yt-dlp resolves every
-        // hit in turn, which is a page load per row.
-        var output = await _run(
-            [
-                $"ytsearch{count.ToString(CultureInfo.InvariantCulture)}:{query} Karaoke",
-                "--dump-json",
-                "--flat-playlist",
-                "--no-warnings",
-            ],
-            CancellationToken.None);
+        string output;
+
+        try
+        {
+            // --flat-playlist keeps this to the search response itself. Without it yt-dlp resolves
+            // every hit in turn, which is a page load per row.
+            output = await _run(
+                [
+                    $"ytsearch{count.ToString(CultureInfo.InvariantCulture)}:{query} Karaoke",
+                    "--dump-json",
+                    "--flat-playlist",
+                    "--no-warnings",
+                ],
+                CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            // The host already logs a thrown SearchAsync and treats it as no results (see
+            // IMediaProvider.SearchAsync), so without this the operator just sees an empty list
+            // with nothing explaining why.
+            _logger.LogWarning(ex, "YouTube search failed for '{Query}'", query);
+            FlashSearchFailureOnce(DescribeSearchFailure(ex));
+
+            return [];
+        }
+
+        // A search that works again is a cleared cause: the same failure later is worth saying again.
+        _lastSearchFailureFlash = null;
 
         return [.. ParseResults(output)];
+    }
+
+    /// <summary>Plain words for what a host can do, never the raw exception text — yt-dlp's own
+    /// stderr line is for the log, not the console.</summary>
+    private static string DescribeSearchFailure(Exception ex) => ex switch
+    {
+        KHostException { ReferenceCode: "KH-YOUTUBE-YTDLP-OUTDATED" } =>
+            "YouTube: search failed — yt-dlp on this machine looks too old. Run 'yt-dlp -U' to update it.",
+        FileNotFoundException =>
+            "YouTube: search failed — yt-dlp was not found at its configured path. Check the yt-dlp Path setting.",
+        _ =>
+            "YouTube: search failed — yt-dlp could not be reached. Check your internet connection, or the yt-dlp Path setting.",
+    };
+
+    private void FlashSearchFailureOnce(string message)
+    {
+        if (message == _lastSearchFailureFlash) return;
+
+        _lastSearchFailureFlash = message;
+        _flash.Show(message, FlashType.Warning);
     }
 
     /// <summary>One JSON object per line. A blank or half-written line is skipped, not thrown over.</summary>
