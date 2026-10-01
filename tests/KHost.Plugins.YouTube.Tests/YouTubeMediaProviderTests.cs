@@ -1,4 +1,5 @@
 using KHost.Plugins.YouTube;
+using KHost.Abstractions.Exceptions;
 using KHost.Abstractions.Models;
 using KHost.Abstractions.Services;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -17,6 +18,7 @@ public class YouTubeMediaProviderTests : IDisposable
     private readonly IMediaAcquisitionService _library = Substitute.For<IMediaAcquisitionService>();
     private readonly ISingerQueueService _queue = Substitute.For<ISingerQueueService>();
     private readonly IPerformanceService _performances = Substitute.For<IPerformanceService>();
+    private readonly IFlashService _flash = Substitute.For<IFlashService>();
     private readonly Guid _singerId = Guid.NewGuid();
     private readonly FakeRunner _runner = new() { Output = SearchOutput };
     private readonly YouTubeMediaProvider _provider;
@@ -32,7 +34,7 @@ public class YouTubeMediaProviderTests : IDisposable
         _queue.SelectedUserId.Returns(_singerId);
 
         _provider = new YouTubeMediaProvider(
-            _plugin, _library, _queue, _performances, NullLogger<YouTubeMediaProvider>.Instance, _runner.RunAsync);
+            _plugin, _library, _queue, _performances, NullLogger<YouTubeMediaProvider>.Instance, _flash, _runner.RunAsync);
     }
 
     public void Dispose()
@@ -313,6 +315,76 @@ public class YouTubeMediaProviderTests : IDisposable
     }
 
     [Fact]
+    public async Task SearchAsync_RunnerThrows_ReturnsEmptyAndFlashesAWarning()
+    {
+        _runner.ThrowOnRun = new InvalidOperationException("yt-dlp exited with 1: network unreachable");
+
+        var results = await _provider.SearchAsync("africa karaoke");
+
+        Assert.Empty(results);
+        _flash.Received(1).Show(
+            "YouTube: search failed — yt-dlp could not be reached. Check your internet connection, or the yt-dlp Path setting.",
+            FlashType.Warning);
+    }
+
+    [Fact]
+    public async Task SearchAsync_RunnerThrowsFileNotFound_FlashesTheConfiguredPathMessage()
+    {
+        _runner.ThrowOnRun = new FileNotFoundException("yt-dlp is not at the configured path '/bad/path'.", "/bad/path");
+
+        await _provider.SearchAsync("africa karaoke");
+
+        _flash.Received(1).Show(
+            "YouTube: search failed — yt-dlp was not found at its configured path. Check the yt-dlp Path setting.",
+            FlashType.Warning);
+    }
+
+    [Fact]
+    public async Task SearchAsync_RunnerThrowsOutOfDateKHostException_FlashesTheUpdateMessage()
+    {
+        _runner.ThrowOnRun = new KHostException(
+            "YouTube refused the request, which almost always means the yt-dlp on this machine is too old.",
+            "Update yt-dlp and try again.",
+            "KH-YOUTUBE-YTDLP-OUTDATED");
+
+        await _provider.SearchAsync("africa karaoke");
+
+        _flash.Received(1).Show(
+            "YouTube: search failed — yt-dlp on this machine looks too old. Run 'yt-dlp -U' to update it.",
+            FlashType.Warning);
+    }
+
+    /// <summary>Avoids spam: a search that keeps failing the same way (every keystroke on slow
+    /// typing) must not restack the same message.</summary>
+    [Fact]
+    public async Task SearchAsync_RunnerThrowsTheSameCauseTwice_FlashesOnlyOnce()
+    {
+        _runner.ThrowOnRun = new InvalidOperationException("network unreachable");
+
+        await _provider.SearchAsync("africa karaoke");
+        await _provider.SearchAsync("wonderwall karaoke");
+
+        _flash.Received(1).Show(Arg.Any<string>(), Arg.Any<FlashType>());
+    }
+
+    /// <summary>The cause is "cleared" by a search that works again, so the same failure recurring
+    /// later is worth telling the host about a second time.</summary>
+    [Fact]
+    public async Task SearchAsync_RunnerThrowsThenSucceedsThenThrowsAgain_FlashesTwice()
+    {
+        _runner.ThrowOnRun = new InvalidOperationException("network unreachable");
+        await _provider.SearchAsync("africa karaoke");
+
+        _runner.ThrowOnRun = null;
+        await _provider.SearchAsync("africa karaoke");
+
+        _runner.ThrowOnRun = new InvalidOperationException("network unreachable");
+        await _provider.SearchAsync("africa karaoke");
+
+        _flash.Received(2).Show(Arg.Any<string>(), Arg.Any<FlashType>());
+    }
+
+    [Fact]
     public void Actions_ExposesOneTopLevelEnqueueActionWithOpenOnYouTubeAsASubAction()
     {
         var action = Assert.Single(_provider.Actions);
@@ -547,6 +619,11 @@ public class YouTubeMediaProviderTests : IDisposable
 
         await _library.Received(1).ImportAsync(Arg.Any<MediaImportRequest>());
         await _performances.DidNotReceive().CreateAndEnqueueAsync(Arg.Any<Performance>());
+
+        // Matches the host's own LocalMediaProvider: a race between selecting a singer and the
+        // click landing is left as a log line, not a flash — the Enqueue button is already
+        // disabled with no singer selected, so this is not a host-visible refusal.
+        _flash.DidNotReceiveWithAnyArgs().Show(default!, default);
     }
 
     [Fact]
@@ -577,6 +654,10 @@ public class YouTubeMediaProviderTests : IDisposable
         Assert.Equal("yt-dlp exploded", exception.Message);
         await _library.Received(1).FailImportAsync(mediaId, Arg.Is<string?>(reason => !string.IsNullOrWhiteSpace(reason)));
         await _library.DidNotReceive().CompleteImportAsync(Arg.Any<Guid>());
+
+        // FailImportAsync's reason already reaches the Downloads page; flashing the same failure
+        // here would just be the same news twice.
+        _flash.DidNotReceiveWithAnyArgs().Show(default!, default);
     }
 
     [Fact]
