@@ -1,6 +1,6 @@
 # KHost.Plugins.YouTube
 
-YouTube media provider for [KHost](../KHost). Adds a YouTube search provider to the console's
+YouTube media provider for [KHost](https://github.com/riddlemd/KHost). Adds a YouTube search provider to the console's
 Song Search panel, with an "Open on YouTube" result action.
 
 Searches run through [yt-dlp](https://github.com/yt-dlp/yt-dlp), so **there is no API key to
@@ -13,22 +13,13 @@ string, and the channel is the uploader rather than the performer, so it stays i
 
 ## Building
 
-Requires a sibling checkout of the KHost repo (the plugin compiles against
-`KHost.Plugins.Sdk` by project reference until the Sdk ships as a NuGet package):
-
-```
-~/Developer/riddlemd/
-  KHost/
-  KHost.Plugins.YouTube/
-```
+The contracts come from the `KHost.Abstractions` and `KHost.Common` packages, so no checkout of
+KHost is needed to build:
 
 ```bash
 dotnet build KHost.Plugins.YouTube.slnx
 dotnet test tests/KHost.Plugins.YouTube.Tests
 ```
-
-Building also drops the plugin into the sibling KHost checkout's runtime plugins folder
-(`src/KHost.UserInterface/bin/Debug/net10.0/plugins/khost.youtube/`) when it exists.
 
 ## Installing
 
