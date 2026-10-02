@@ -21,7 +21,7 @@ public class YouTubePluginTests : IDisposable
 
         await YouTubePlugin.PrepareAsync(resolver, new YouTubeSettings(), _context, NullLogger<YouTubePlugin>.Instance);
 
-        _context.Received(1).ReportWarning(Arg.Is<string>(m => m.Contains("could not be prepared")));
+        _context.Received(1).AddWarning(Arg.Is<string>(m => m.Contains("could not be prepared")));
     }
 
     [Fact]
@@ -35,7 +35,7 @@ public class YouTubePluginTests : IDisposable
 
         await YouTubePlugin.PrepareAsync(resolver, new YouTubeSettings(), _context, NullLogger<YouTubePlugin>.Instance);
 
-        _context.DidNotReceiveWithAnyArgs().ReportWarning(default!);
+        _context.DidNotReceiveWithAnyArgs().AddWarning(default!);
     }
 
     [Fact]
@@ -53,9 +53,9 @@ public class YouTubePluginTests : IDisposable
             resolver, new YouTubeSettings { AutoUpdate = false }, _context, NullLogger<YouTubePlugin>.Instance);
 
         if (OperatingSystem.IsMacOS())
-            _context.Received(1).ReportWarning(Arg.Is<string>(m => m.Contains("brew install yt-dlp")));
+            _context.Received(1).AddWarning(Arg.Is<string>(m => m.Contains("brew install yt-dlp")));
         else
-            _context.DidNotReceiveWithAnyArgs().ReportWarning(default!);
+            _context.DidNotReceiveWithAnyArgs().AddWarning(default!);
     }
 
     public void Dispose()
