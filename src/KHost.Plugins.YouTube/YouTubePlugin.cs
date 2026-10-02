@@ -49,7 +49,7 @@ public sealed class YouTubePlugin : IPlugin
         {
             // Reported rather than thrown: searching is what fails, and it can say so itself with
             // the query in hand. This only explains it in advance.
-            context.ReportWarning($"yt-dlp could not be prepared: {ex.Message}");
+            context.AddWarning($"yt-dlp could not be prepared: {ex.Message}");
             return;
         }
 
@@ -57,7 +57,7 @@ public sealed class YouTubePlugin : IPlugin
             return;
 
         if (OperatingSystem.IsMacOS())
-            context.ReportWarning(SlowOnMacOs);
+            context.AddWarning(SlowOnMacOs);
 
         if (!settings.AutoUpdate)
             return;
@@ -69,7 +69,7 @@ public sealed class YouTubePlugin : IPlugin
         catch (Exception ex)
         {
             // The version already on disk still works, so this is worth saying and not worth failing.
-            context.ReportWarning($"yt-dlp could not be updated: {ex.Message}");
+            context.AddWarning($"yt-dlp could not be updated: {ex.Message}");
         }
     }
 }
