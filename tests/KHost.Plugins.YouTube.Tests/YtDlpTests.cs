@@ -112,6 +112,101 @@ public class YtDlpTests : IDisposable
         Assert.True(await WaitUntilDeadAsync(childPid), "child sleep process survived the cancel");
     }
 
+    [Fact]
+    public async Task RunAsync_RunsPastItsTimeout_ThrowsATimeoutNotACancelAndKillsTheWholeTree()
+    {
+        var pidFile = Path.Combine(_root, "child.pid");
+        var stub = Stub.SleepInAChild(pidFile);
+
+        // Generous enough that a slow shell start does not trip it before the child reports in.
+        var run = Build(stub).RunAsync(stub.Arguments, timeout: TimeSpan.FromSeconds(3));
+        var childPid = await WaitForChildPidAsync(pidFile);
+
+        await Assert.ThrowsAsync<YtDlpTimeoutException>(() => run);
+
+        Assert.True(await WaitUntilDeadAsync(childPid), "child sleep process survived the timeout");
+    }
+
+    [Fact]
+    public async Task RunAsync_FinishesInsideItsTimeout_ReturnsTheOutput()
+    {
+        var stub = Stub.Echo("one");
+
+        var output = await Build(stub).RunAsync(stub.Arguments, timeout: TimeSpan.FromSeconds(30));
+
+        Assert.Equal("one", output);
+    }
+
+    [Fact]
+    public async Task RunAsync_CancelledByTheCallerWithATimeoutSet_StaysACancel()
+    {
+        var stub = Stub.Sleep();
+
+        using var cts = new CancellationTokenSource();
+        var run = Build(stub).RunAsync(stub.Arguments, cts.Token, timeout: TimeSpan.FromMinutes(5));
+        await cts.CancelAsync();
+
+        var ex = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+        Assert.IsNotType<YtDlpTimeoutException>(ex);
+    }
+
+    [Fact]
+    public async Task RunAsync_NoYtDlpAndTheFetchFails_ThrowsUnavailableCarryingTheCause()
+    {
+        var resolver = new YtDlpResolver(null, _root, pathVariable: "", handler: new ThrowingHandler());
+
+        var ex = await Assert.ThrowsAsync<YtDlpUnavailableException>(() => new YtDlp(resolver).RunAsync(["--version"]));
+
+        Assert.IsType<HttpRequestException>(ex.InnerException);
+    }
+
+    [Fact]
+    public async Task RunAsync_FetchStillBackedOff_ThrowsUnavailableWithTheOriginalCauseNotAWrapperOfIt()
+    {
+        var resolver = new YtDlpResolver(null, _root, pathVariable: "", handler: new ThrowingHandler());
+        var ytDlp = new YtDlp(resolver);
+        await Assert.ThrowsAsync<YtDlpUnavailableException>(() => ytDlp.RunAsync(["--version"]));
+
+        var ex = await Assert.ThrowsAsync<YtDlpUnavailableException>(() => ytDlp.RunAsync(["--version"]));
+
+        Assert.IsType<HttpRequestException>(ex.InnerException);
+    }
+
+    [Fact]
+    public async Task RunAsync_CancelledWhileFetchingYtDlp_StaysACancelRatherThanBecomingUnavailable()
+    {
+        var resolver = new YtDlpResolver(null, _root, pathVariable: "", handler: new HangingHandler());
+        using var cts = new CancellationTokenSource();
+
+        var run = new YtDlp(resolver).RunAsync(["--version"], cts.Token);
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+    }
+
+    [Fact]
+    public async Task RunAsync_ConfiguredPathMissing_ThrowsItUnwrapped()
+    {
+        var resolver = new YtDlpResolver(Path.Combine(_root, "nowhere"), _root);
+
+        await Assert.ThrowsAsync<FileNotFoundException>(() => new YtDlp(resolver).RunAsync(["--version"]));
+    }
+
+    private sealed class HangingHandler : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            return new HttpResponseMessage();
+        }
+    }
+
+    private sealed class ThrowingHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            => throw new HttpRequestException("network is down");
+    }
+
     private static async Task<int> WaitForChildPidAsync(string pidFile)
     {
         // Generous: the Windows stub pays for a PowerShell start before it can report anything.

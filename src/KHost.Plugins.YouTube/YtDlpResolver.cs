@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IO.Compression;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -11,11 +12,26 @@ public sealed class YtDlpResolver
     private const string LatestAssetUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download";
     private const string SumsUrl = LatestAssetUrl + "/SHA2-512SUMS";
 
+    /// <summary>After a failed fetch, how long searches leave it alone: every search resolves yt-dlp,
+    /// so offline each one would otherwise retry a 35MB download and wait out its failure.</summary>
+    internal static readonly TimeSpan FailureBackOff = TimeSpan.FromMinutes(5);
+
+    /// <summary>How long a fetch may go without a byte. Idle rather than total: a slow link is still
+    /// moving and should finish, while a stalled one would otherwise hold every search for HttpClient's
+    /// 100 second header wait and never give up on the body at all.</summary>
+    internal static readonly TimeSpan DefaultStallTimeout = TimeSpan.FromSeconds(30);
+
+    // Static because the startup task and the search provider each build their own resolver, and a
+    // back-off one of them cannot see would not stop the other retrying.
+    private static readonly ConcurrentDictionary<string, (DateTimeOffset At, Exception Cause)> Failures = new();
+
     private readonly string? _configuredPath;
     private readonly string _toolsDirectory;
     private readonly string? _pathVariable;
     private readonly HttpMessageHandler? _handler;
     private readonly string _asset;
+    private readonly TimeSpan _stallTimeout;
+    private readonly TimeProvider _time;
 
     /// <param name="asset">Overrides the asset for this platform. Only a test has cause to set it: the
     /// archive-unpack path is published for one target and must not go unrun until a host hits it.</param>
@@ -24,13 +40,17 @@ public sealed class YtDlpResolver
         string toolsDirectory,
         string? pathVariable = null,
         HttpMessageHandler? handler = null,
-        string? asset = null)
+        string? asset = null,
+        TimeSpan? stallTimeout = null,
+        TimeProvider? time = null)
     {
         _configuredPath = configuredPath;
         _toolsDirectory = toolsDirectory;
         _pathVariable = pathVariable ?? Environment.GetEnvironmentVariable("PATH");
         _handler = handler;
         _asset = asset ?? AssetName;
+        _stallTimeout = stallTimeout ?? DefaultStallTimeout;
+        _time = time ?? TimeProvider.System;
     }
 
     /// <summary>The release asset this OS and architecture needs.</summary>
@@ -135,6 +155,27 @@ public sealed class YtDlpResolver
 
         if (File.Exists(destination)) return destination;
 
+        var key = Path.GetFullPath(_toolsDirectory);
+
+        if (Failures.TryGetValue(key, out var failure) && _time.GetUtcNow() - failure.At < FailureBackOff)
+            throw new YtDlpUnavailableException(failure.Cause);
+
+        try
+        {
+            await FetchAsync(asset, isArchive, destination, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // A cancel is the caller's choice, not the fetch failing, so it earns no back-off.
+            Failures[key] = (_time.GetUtcNow(), ex);
+            throw;
+        }
+
+        return destination;
+    }
+
+    private async Task FetchAsync(string asset, bool isArchive, string destination, CancellationToken cancellationToken)
+    {
         Directory.CreateDirectory(_toolsDirectory);
 
         // Staged, then moved. A download that dies halfway leaves a truncated file that File.Exists
@@ -147,13 +188,25 @@ public sealed class YtDlpResolver
 
         try
         {
-            await using (var source = await http.GetStreamAsync($"{LatestAssetUrl}/{asset}", cancellationToken))
+            using var response = await Bounded(
+                token => http.GetAsync($"{LatestAssetUrl}/{asset}", HttpCompletionOption.ResponseHeadersRead, token),
+                _stallTimeout, cancellationToken);
+            response.EnsureSuccessStatusCode();
+
+            await using (var source = await response.Content.ReadAsStreamAsync(cancellationToken))
             await using (var file = File.Create(staging))
             {
-                await source.CopyToAsync(file, cancellationToken);
+                var buffer = new byte[81920];
+
+                // Each read gets its own clock: CopyToAsync has no way to give up on a body that went quiet.
+                while (await Bounded(
+                    token => source.ReadAsync(buffer, token).AsTask(), _stallTimeout, cancellationToken) is var read and > 0)
+                {
+                    await file.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                }
             }
 
-            await VerifyChecksumAsync(http, staging, asset, cancellationToken);
+            await VerifyChecksumAsync(http, staging, asset, _stallTimeout, cancellationToken);
 
             if (isArchive)
                 Extract(staging, destination);
@@ -166,22 +219,41 @@ public sealed class YtDlpResolver
         }
 
         MakeExecutable(destination);
+    }
 
-        return destination;
+    /// <summary>Runs one network step under an idle limit. A trip surfaces as a TimeoutException, so
+    /// it is told apart from the caller's own cancel, which must stay a cancel.</summary>
+    private static async Task<T> Bounded<T>(
+        Func<CancellationToken, Task<T>> step, TimeSpan limit, CancellationToken cancellationToken)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        linked.CancelAfter(limit);
+
+        try
+        {
+            return await step(linked.Token);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException($"yt-dlp's download made no progress for {limit.TotalSeconds:0} seconds.");
+        }
     }
 
     /// <summary>A compromised release looks like an ordinary download; SUMS is the only proof the
     /// bytes on disk are what yt-dlp shipped, so any failure to confirm that is fatal, not silent.</summary>
     private static async Task VerifyChecksumAsync(
-        HttpClient http, string stagedFile, string asset, CancellationToken cancellationToken)
+        HttpClient http, string stagedFile, string asset, TimeSpan stallTimeout, CancellationToken cancellationToken)
     {
         string sums;
 
         try
         {
-            using var response = await http.GetAsync(SumsUrl, cancellationToken);
-            response.EnsureSuccessStatusCode();
-            sums = await response.Content.ReadAsStringAsync(cancellationToken);
+            sums = await Bounded(async token =>
+            {
+                using var response = await http.GetAsync(SumsUrl, token);
+                response.EnsureSuccessStatusCode();
+                return await response.Content.ReadAsStringAsync(token);
+            }, stallTimeout, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

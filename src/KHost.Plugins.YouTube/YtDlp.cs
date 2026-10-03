@@ -5,9 +5,13 @@ using KHost.Abstractions.Exceptions;
 namespace KHost.Plugins.YouTube;
 
 /// <summary>Runs yt-dlp and hands back its stdout; the seam tests substitute for a real binary.</summary>
-/// <remarks>The optional callback fires once per stdout line as it arrives, for progress.</remarks>
+/// <remarks>The optional callback fires once per stdout line as it arrives, for progress. The optional
+/// timeout bounds the process only, not resolving yt-dlp first, and ends in <see cref="YtDlpTimeoutException"/>.</remarks>
 public delegate Task<string> YtDlpRunner(
-    IReadOnlyList<string> arguments, CancellationToken cancellationToken, Action<string>? onLine = null);
+    IReadOnlyList<string> arguments,
+    CancellationToken cancellationToken,
+    Action<string>? onLine = null,
+    TimeSpan? timeout = null);
 
 /// <summary>Resolves the binary once, then runs it a process at a time.</summary>
 public sealed class YtDlp
@@ -28,13 +32,28 @@ public sealed class YtDlp
     ];
 
     public async Task<string> RunAsync(
-        IReadOnlyList<string> arguments, CancellationToken cancellationToken = default, Action<string>? onLine = null)
+        IReadOnlyList<string> arguments,
+        CancellationToken cancellationToken = default,
+        Action<string>? onLine = null,
+        TimeSpan? timeout = null)
     {
-        var executable = await _resolver.ResolveAsync(cancellationToken);
+        string executable;
 
         try
         {
-            return await RunProcessAsync(executable, arguments, cancellationToken, onLine);
+            executable = await _resolver.ResolveAsync(cancellationToken);
+        }
+        // A configured-path or platform error already reads plainly; any other failure here is the
+        // fetch of a copy that did not happen, which callers word the same way whatever its cause.
+        catch (Exception ex) when (ex is not (OperationCanceledException or FileNotFoundException
+            or PlatformNotSupportedException or YtDlpUnavailableException))
+        {
+            throw new YtDlpUnavailableException(ex);
+        }
+
+        try
+        {
+            return await RunProcessAsync(executable, arguments, cancellationToken, onLine, timeout);
         }
         catch (InvalidOperationException ex) when (LooksOutOfDate(ex.Message))
         {
@@ -54,7 +73,11 @@ public sealed class YtDlp
         => OutOfDateSignatures.Any(signature => message.Contains(signature, StringComparison.OrdinalIgnoreCase));
 
     private static async Task<string> RunProcessAsync(
-        string executable, IReadOnlyList<string> arguments, CancellationToken cancellationToken, Action<string>? onLine)
+        string executable,
+        IReadOnlyList<string> arguments,
+        CancellationToken callerToken,
+        Action<string>? onLine,
+        TimeSpan? timeout)
     {
         var startInfo = new ProcessStartInfo(executable)
         {
@@ -71,6 +94,12 @@ public sealed class YtDlp
 
         using var process = Process.Start(startInfo)
             ?? throw new InvalidOperationException($"Could not start yt-dlp at '{executable}'.");
+
+        // The limit and the caller's cancel share one token so a single kill path serves both; which
+        // of the two fired is told apart in the catch.
+        using var limit = CancellationTokenSource.CreateLinkedTokenSource(callerToken);
+        if (timeout is { } allowed) limit.CancelAfter(allowed);
+        var cancellationToken = limit.Token;
 
         try
         {
@@ -94,6 +123,9 @@ public sealed class YtDlp
             // leaves that ffmpeg process orphaned and still writing the destination file.
             try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
             catch { /* already gone */ }
+
+            if (!callerToken.IsCancellationRequested && timeout is { } exceeded)
+                throw new YtDlpTimeoutException(exceeded);
 
             throw;
         }

@@ -11,6 +11,10 @@ public sealed class YouTubePlugin : IPlugin
         "yt-dlp was downloaded rather than found on this machine. On macOS that build is rescanned "
         + "on every launch, which costs seconds on every search — 'brew install yt-dlp' avoids it.";
 
+    /// <summary>yt-dlp -U fetches a 35MB binary and swaps it in; five minutes covers a poor venue
+    /// link, while a process that never ends would otherwise sit in the background for the whole show.</summary>
+    internal static readonly TimeSpan UpdateTimeout = TimeSpan.FromMinutes(5);
+
     private readonly ILogger<YouTubePlugin> _logger;
 
     // Resolved from the host's container: the loader builds plugins with ActivatorUtilities, so a
@@ -35,7 +39,11 @@ public sealed class YouTubePlugin : IPlugin
     // Internal, not private: what warning a host is shown (missing, provided, or downloaded)
     // is the branch worth a test, and InitializeAsync only fires it on a task nothing can await.
     internal static async Task PrepareAsync(
-        YtDlpResolver resolver, YouTubeSettings settings, IPluginContext context, ILogger logger)
+        YtDlpResolver resolver,
+        YouTubeSettings settings,
+        IPluginContext context,
+        ILogger logger,
+        TimeSpan? updateTimeout = null)
     {
         string executable;
 
@@ -49,7 +57,8 @@ public sealed class YouTubePlugin : IPlugin
         {
             // Reported rather than thrown: searching is what fails, and it can say so itself with
             // the query in hand. This only explains it in advance.
-            context.AddWarning($"yt-dlp could not be prepared: {ex.Message}");
+            logger.LogWarning(ex, "yt-dlp could not be prepared");
+            context.AddWarning(DescribePrepareFailure(ex));
             return;
         }
 
@@ -64,12 +73,31 @@ public sealed class YouTubePlugin : IPlugin
 
         try
         {
-            await new YtDlp(resolver).RunAsync(["-U"]);
+            await new YtDlp(resolver).RunAsync(["-U"], timeout: updateTimeout ?? UpdateTimeout);
         }
         catch (Exception ex)
         {
             // The version already on disk still works, so this is worth saying and not worth failing.
-            context.AddWarning($"yt-dlp could not be updated: {ex.Message}");
+            logger.LogWarning(ex, "yt-dlp could not be updated");
+            context.AddWarning(DescribeUpdateFailure(ex));
         }
     }
+
+    // Plain words only: the exception text is HttpRequestException or yt-dlp's stderr, for the log.
+    private static string DescribePrepareFailure(Exception ex) => ex switch
+    {
+        FileNotFoundException or PlatformNotSupportedException => $"yt-dlp could not be prepared: {ex.Message}",
+        _ when YtDlpFailure.IsConnection(ex) =>
+            "yt-dlp could not be downloaded — no internet connection. YouTube search will not work until it is.",
+        _ => "yt-dlp could not be prepared. The log has the reason.",
+    };
+
+    private static string DescribeUpdateFailure(Exception ex) => ex switch
+    {
+        YtDlpTimeoutException =>
+            "yt-dlp could not check for updates — it took too long; the installed copy is still used.",
+        _ when YtDlpFailure.IsConnection(ex) =>
+            "yt-dlp could not check for updates — no internet connection; the installed copy is still used.",
+        _ => "yt-dlp could not check for updates; the installed copy is still used. The log has the reason.",
+    };
 }

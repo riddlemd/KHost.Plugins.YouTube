@@ -627,7 +627,7 @@ public class YouTubeMediaProviderTests : IDisposable
     }
 
     [Fact]
-    public async Task DownloadAndEnqueueAsync_DownloadProducesNoFile_FailsImportThenThrows()
+    public async Task DownloadAndEnqueueAsync_DownloadProducesNoFile_FailsImportAndFlashesWithoutThrowing()
     {
         var entity = BuildEntity("dl-fail", "Missing", "", null, "");
         var mediaId = Guid.NewGuid();
@@ -635,28 +635,187 @@ public class YouTubeMediaProviderTests : IDisposable
 
         // _runner.OnRun left unset: the fake runs "successfully" but never writes the file, the
         // same shape a real yt-dlp failure leaves behind.
-        await Assert.ThrowsAsync<InvalidOperationException>(() => Enqueue(entity));
+        await Enqueue(entity);
 
-        await _library.Received(1).FailImportAsync(mediaId, Arg.Is<string?>(reason => !string.IsNullOrWhiteSpace(reason)));
+        await _library.Received(1).FailImportAsync(mediaId, "yt-dlp finished without producing a file.");
         await _library.DidNotReceive().CompleteImportAsync(Arg.Any<Guid>());
+        _flash.Received(1).Show(
+            "YouTube: could not download 'Missing' — yt-dlp finished without producing a file.", FlashType.Warning);
     }
 
     [Fact]
-    public async Task DownloadAndEnqueueAsync_RunnerThrows_FailsImportThenPropagates()
+    public async Task DownloadAndEnqueueAsync_DownloadProducesNoFile_KeepsYtDlpsOutputOutOfTheFlash()
+    {
+        var entity = BuildEntity("dl-noisy", "Noisy", "", null, "");
+        StubBegin(Guid.NewGuid());
+        _runner.Output = "[download] some very long yt-dlp chatter";
+
+        await Enqueue(entity);
+
+        _flash.DidNotReceive().Show(Arg.Is<string>(m => m.Contains("chatter")), Arg.Any<FlashType>());
+        await _library.DidNotReceive().FailImportAsync(Arg.Any<Guid>(), Arg.Is<string?>(r => r!.Contains("chatter")));
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_OfflineStderr_FailsImportAndFlashesThePlainConnectionLine()
+    {
+        var entity = BuildEntity("dl-offline", "Africa", "", null, "");
+        var mediaId = Guid.NewGuid();
+        StubBegin(mediaId);
+        _runner.ThrowOnRun = new InvalidOperationException(
+            "yt-dlp exited with 1: ERROR: Unable to download API page: Failed to establish a new connection");
+
+        await Enqueue(entity);
+
+        await _library.Received(1).FailImportAsync(mediaId, YtDlpFailure.Unreachable);
+        await _library.DidNotReceive().CompleteImportAsync(Arg.Any<Guid>());
+        _flash.Received(1).Show(
+            "YouTube: could not download 'Africa' — YouTube could not be reached. Check this computer is online, then try again.",
+            FlashType.Warning);
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_YtDlpCouldNotBeFetched_FlashesTheNotInstalledLine()
+    {
+        var entity = BuildEntity("dl-nofetch", "Africa", "", null, "");
+        var mediaId = Guid.NewGuid();
+        StubBegin(mediaId);
+        _runner.ThrowOnRun = new YtDlpUnavailableException(new HttpRequestException("network is down"));
+
+        await Enqueue(entity);
+
+        const string reason = "yt-dlp is not installed and could not be downloaded. Check this computer is online, then try again.";
+        await _library.Received(1).FailImportAsync(mediaId, reason);
+        _flash.Received(1).Show($"YouTube: could not download 'Africa' — {reason}", FlashType.Warning);
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_RunnerThrowsOtherError_FailsImportWithTheErrorLineButFlashesOnlyThePlainLine()
     {
         var entity = BuildEntity("dl-throw", "Broken", "", null, "");
         var mediaId = Guid.NewGuid();
         StubBegin(mediaId);
-        _runner.ThrowOnRun = new InvalidOperationException("yt-dlp exploded");
+        _runner.ThrowOnRun = new InvalidOperationException("yt-dlp exited with 1: ERROR: Video unavailable\nsecond line");
 
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => Enqueue(entity));
+        await Enqueue(entity);
 
-        Assert.Equal("yt-dlp exploded", exception.Message);
-        await _library.Received(1).FailImportAsync(mediaId, Arg.Is<string?>(reason => !string.IsNullOrWhiteSpace(reason)));
+        await _library.Received(1).FailImportAsync(mediaId, "yt-dlp could not fetch it. (Video unavailable)");
         await _library.DidNotReceive().CompleteImportAsync(Arg.Any<Guid>());
+        _flash.Received(1).Show("YouTube: could not download 'Broken' — yt-dlp could not fetch it.", FlashType.Warning);
+    }
 
-        // FailImportAsync's reason already reaches the Downloads page; flashing the same failure
-        // here would just be the same news twice.
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_RunnerThrowsOutOfDate_FlashesTheUpdateLine()
+    {
+        var entity = BuildEntity("dl-old", "Old", "", null, "");
+        StubBegin(Guid.NewGuid());
+        _runner.ThrowOnRun = new KHostException("refused", "update", YtDlpFailure.OutdatedCode);
+
+        await Enqueue(entity);
+
+        _flash.Received(1).Show(
+            "YouTube: could not download 'Old' — yt-dlp on this machine looks too old. Run 'yt-dlp -U' to update it.",
+            FlashType.Warning);
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_RunnerThrowsConfiguredPathMissing_FlashesThePathLine()
+    {
+        var entity = BuildEntity("dl-path", "Pathless", "", null, "");
+        StubBegin(Guid.NewGuid());
+        _runner.ThrowOnRun = new FileNotFoundException("gone");
+
+        await Enqueue(entity);
+
+        _flash.Received(1).Show(
+            "YouTube: could not download 'Pathless' — yt-dlp was not found at its configured path. Check the yt-dlp Path setting.",
+            FlashType.Warning);
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_YtDlpTimesOut_FlashesTheTookTooLongLine()
+    {
+        var entity = BuildEntity("dl-slow", "Slow", "", null, "");
+        StubBegin(Guid.NewGuid());
+        _runner.ThrowOnRun = new YtDlpTimeoutException(TimeSpan.FromSeconds(1));
+
+        await Enqueue(entity);
+
+        _flash.Received(1).Show(
+            "YouTube: could not download 'Slow' — yt-dlp took too long and was stopped. Try again.", FlashType.Warning);
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_FailedDownload_ReleasesTheInFlightGuardSoItCanBeRetried()
+    {
+        var entity = BuildEntity("dl-retry", "Retry", "", null, "");
+        var destination = TrackDestinationFor(entity);
+        StubBegin(Guid.NewGuid());
+        _runner.ThrowOnRun = new InvalidOperationException("yt-dlp exited with 1: boom");
+
+        await Enqueue(entity);
+
+        _runner.ThrowOnRun = null;
+        _runner.OnRun = _ => File.WriteAllBytes(destination, [1]);
+        await Enqueue(entity);
+
+        Assert.Equal(2, _runner.Calls.Count);
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_DownloadRunsWithoutATimeout()
+    {
+        var entity = BuildEntity("dl-long", "Long", "", null, "");
+        StubBegin(Guid.NewGuid());
+        _runner.OnRun = _ => File.WriteAllBytes(TrackDestinationFor(entity), [1]);
+
+        await Enqueue(entity);
+
+        // A real download is minutes of progress, and only the host's cancel may end it.
+        Assert.Null(_runner.LastTimeout);
+    }
+
+    [Fact]
+    public async Task SearchAsync_RunsUnderTheSearchTimeout()
+    {
+        await _provider.SearchAsync("africa");
+
+        Assert.Equal(YouTubeMediaProvider.SearchTimeout, _runner.LastTimeout);
+    }
+
+    [Fact]
+    public async Task SearchAsync_YtDlpTimesOut_ReturnsEmptyAndFlashesTheTookTooLongLine()
+    {
+        _runner.ThrowOnRun = new YtDlpTimeoutException(TimeSpan.FromSeconds(90));
+
+        var results = await _provider.SearchAsync("africa");
+
+        Assert.Empty(results);
+        _flash.Received(1).Show(
+            "YouTube: search failed — it took too long. Check your internet connection and try again.", FlashType.Warning);
+    }
+
+    [Fact]
+    public async Task SearchAsync_YtDlpCouldNotBeFetched_FlashesTheNotInstalledLine()
+    {
+        _runner.ThrowOnRun = new YtDlpUnavailableException(new HttpRequestException("network is down"));
+
+        await _provider.SearchAsync("africa");
+
+        _flash.Received(1).Show(
+            "YouTube: search failed — yt-dlp is not installed and could not be downloaded. Check this computer is online.",
+            FlashType.Warning);
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_CancelledWhileFailing_StillPropagatesTheCancel()
+    {
+        var entity = BuildEntity("dl-cancel-prop", "Cancel", "", null, "");
+        StubBegin(Guid.NewGuid());
+        _runner.ThrowOnRun = new OperationCanceledException();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => Enqueue(entity));
+
         _flash.DidNotReceiveWithAnyArgs().Show(default!, default);
     }
 
@@ -682,14 +841,14 @@ public class YouTubeMediaProviderTests : IDisposable
         await _library.Received(1).BeginImportAsync(Arg.Any<MediaImportRequest>());
 
         _runner.Gate.SetResult("");
-        await Assert.ThrowsAsync<InvalidOperationException>(() => firstCall);
+        await firstCall;
 
         await _library.Received(1).FailImportAsync(mediaId, Arg.Is<string?>(reason => !string.IsNullOrWhiteSpace(reason)));
 
         // The finally block must have removed the ForeignKey from the in-flight set, so a third
         // call after the first settles is allowed to start its own run.
         _runner.Gate = null;
-        await Assert.ThrowsAsync<InvalidOperationException>(() => Enqueue(entity));
+        await Enqueue(entity);
         Assert.Equal(2, _runner.Calls.Count);
     }
 
@@ -804,6 +963,7 @@ public class YouTubeMediaProviderTests : IDisposable
         public Action<IReadOnlyList<string>>? OnRun { get; set; }
         public Exception? ThrowOnRun { get; set; }
         public CancellationToken? LastToken { get; private set; }
+        public TimeSpan? LastTimeout { get; private set; }
 
         /// <summary>Set to hang a call until released, simulating an in-flight download.</summary>
         public TaskCompletionSource<string>? Gate { get; set; }
@@ -812,9 +972,13 @@ public class YouTubeMediaProviderTests : IDisposable
         public IReadOnlyList<string> LinesToStream { get; set; } = [];
 
         public async Task<string> RunAsync(
-            IReadOnlyList<string> arguments, CancellationToken cancellationToken, Action<string>? onLine = null)
+            IReadOnlyList<string> arguments,
+            CancellationToken cancellationToken,
+            Action<string>? onLine = null,
+            TimeSpan? timeout = null)
         {
             Calls.Add(arguments);
+            LastTimeout = timeout;
             LastToken = cancellationToken;
             OnRun?.Invoke(arguments);
 
