@@ -17,8 +17,13 @@ public class YtDlpResolverTests : IDisposable
 
     // Empty rather than the real PATH: this machine may or may not have yt-dlp installed, and a test
     // that passes only on one of those machines is worse than no test.
-    private YtDlpResolver Resolver(string? configuredPath = null, string? pathVariable = "", string? asset = null)
-        => new(configuredPath, ToolsDirectory, pathVariable, _handler, asset);
+    private YtDlpResolver Resolver(
+        string? configuredPath = null,
+        string? pathVariable = "",
+        string? asset = null,
+        TimeSpan? stallTimeout = null,
+        TimeProvider? time = null)
+        => new(configuredPath, ToolsDirectory, pathVariable, _handler, asset, stallTimeout, time);
 
     public YtDlpResolverTests() => Directory.CreateDirectory(_root);
 
@@ -243,6 +248,115 @@ public class YtDlpResolverTests : IDisposable
                 $"unexpected Linux asset '{asset}'");
     }
 
+    private static readonly TimeSpan QuickStall = TimeSpan.FromMilliseconds(150);
+
+    private void AssertNothingLeftBehind()
+    {
+        Assert.False(File.Exists(Path.Combine(ToolsDirectory, YtDlpResolver.ExecutableName)));
+        Assert.Empty(Directory.Exists(ToolsDirectory) ? Directory.GetFiles(ToolsDirectory) : []);
+    }
+
+    [Fact]
+    public async Task ResolveAsync_ServerNeverAnswers_GivesUpAsATimeoutInsteadOfWaitingOnHttpClientsDefault()
+    {
+        _handler.StallHeaders = true;
+
+        await Assert.ThrowsAsync<TimeoutException>(() => Resolver(stallTimeout: QuickStall).ResolveAsync());
+
+        AssertNothingLeftBehind();
+    }
+
+    [Fact]
+    public async Task ResolveAsync_BodyGoesQuietMidDownload_GivesUpAsATimeoutAndLeavesNothingBehind()
+    {
+        _handler.StallBody = true;
+
+        await Assert.ThrowsAsync<TimeoutException>(() => Resolver(stallTimeout: QuickStall).ResolveAsync());
+
+        AssertNothingLeftBehind();
+    }
+
+    [Fact]
+    public async Task ResolveAsync_ChecksumFetchNeverAnswers_FailsVerificationRatherThanHanging()
+    {
+        _handler.StallSums = true;
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => Resolver(stallTimeout: QuickStall).ResolveAsync());
+
+        Assert.IsType<TimeoutException>(ex.InnerException);
+        AssertNothingLeftBehind();
+    }
+
+    [Fact]
+    public async Task ResolveAsync_CancelledByTheCaller_StaysACancelAndIsNotTakenForATimeout()
+    {
+        _handler.StallHeaders = true;
+        using var cts = new CancellationTokenSource();
+        var resolve = Resolver(stallTimeout: TimeSpan.FromMinutes(5)).ResolveAsync(cts.Token);
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => resolve);
+    }
+
+    [Fact]
+    public async Task ResolveAsync_AfterAFailedFetch_DoesNotTryAgainUntilTheBackOffPasses()
+    {
+        var time = new FakeTime();
+        _handler.Throw = true;
+        await Assert.ThrowsAsync<HttpRequestException>(() => Resolver(time: time).ResolveAsync());
+        var requestsAfterFailure = _handler.Requests.Count;
+
+        // The network is back, but a search a second later must not pay for another attempt.
+        _handler.Throw = false;
+        time.Now += TimeSpan.FromSeconds(1);
+
+        var ex = await Assert.ThrowsAsync<YtDlpUnavailableException>(() => Resolver(time: time).ResolveAsync());
+
+        Assert.IsType<HttpRequestException>(ex.InnerException);
+        Assert.Equal(requestsAfterFailure, _handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task ResolveAsync_JustInsideTheBackOff_StillDoesNotRetry()
+    {
+        var time = new FakeTime();
+        _handler.Throw = true;
+        await Assert.ThrowsAsync<HttpRequestException>(() => Resolver(time: time).ResolveAsync());
+
+        _handler.Throw = false;
+        time.Now += YtDlpResolver.FailureBackOff - TimeSpan.FromSeconds(1);
+
+        await Assert.ThrowsAsync<YtDlpUnavailableException>(() => Resolver(time: time).ResolveAsync());
+    }
+
+    [Fact]
+    public async Task ResolveAsync_OnceTheBackOffPasses_FetchesAgain()
+    {
+        var time = new FakeTime();
+        _handler.Throw = true;
+        await Assert.ThrowsAsync<HttpRequestException>(() => Resolver(time: time).ResolveAsync());
+
+        _handler.Throw = false;
+        time.Now += YtDlpResolver.FailureBackOff;
+
+        var resolved = await Resolver(time: time).ResolveAsync();
+
+        Assert.True(File.Exists(resolved));
+    }
+
+    [Fact]
+    public async Task ResolveAsync_ACancelledFetch_EarnsNoBackOff()
+    {
+        _handler.StallHeaders = true;
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Resolver().ResolveAsync(cts.Token));
+
+        _handler.StallHeaders = false;
+
+        Assert.True(File.Exists(await Resolver().ResolveAsync()));
+    }
+
     private sealed class FakeDownloadHandler : HttpMessageHandler
     {
         public string? Body { get; set; } = "";
@@ -260,20 +374,35 @@ public class YtDlpResolverTests : IDisposable
         /// <summary>The SUMS endpoint 404s, as if the release published none.</summary>
         public bool SumsMissing { get; set; }
 
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        /// <summary>The server accepts the connection and never answers.</summary>
+        public bool StallHeaders { get; set; }
+
+        /// <summary>Headers arrive, a few bytes follow, then the body goes silent.</summary>
+        public bool StallBody { get; set; }
+
+        /// <summary>The asset downloads fine but the checksum fetch never answers.</summary>
+        public bool StallSums { get; set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             Requests.Add(request.RequestUri!.AbsoluteUri);
 
             if (Throw) throw new HttpRequestException("network is down");
 
-            if (request.RequestUri!.AbsoluteUri.Contains("SHA2-512SUMS", StringComparison.Ordinal))
-                return Task.FromResult(BuildSumsResponse());
+            var isSums = request.RequestUri!.AbsoluteUri.Contains("SHA2-512SUMS", StringComparison.Ordinal);
 
-            HttpContent content = FailMidStream ? new StreamContent(new TruncatingStream())
+            if (StallHeaders || (StallSums && isSums))
+                await Task.Delay(Timeout.Infinite, cancellationToken);
+
+            if (isSums)
+                return BuildSumsResponse();
+
+            HttpContent content = StallBody ? new StreamContent(new StallingStream())
+                : FailMidStream ? new StreamContent(new TruncatingStream())
                 : ZipEntries is not null ? new ByteArrayContent(BuildZip(ZipEntries))
                 : new StringContent(Body ?? "");
 
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
         }
 
         private HttpResponseMessage BuildSumsResponse()
@@ -341,5 +470,46 @@ public class YtDlpResolverTests : IDisposable
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
         public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    /// <summary>A few bytes, then silence until the read is cancelled: a connection that stays open
+    /// and carries nothing.</summary>
+    private sealed class StallingStream : Stream
+    {
+        private bool _served;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (!_served)
+            {
+                _served = true;
+                buffer.Span[..4].Fill((byte)'x');
+                return 4;
+            }
+
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            return 0;
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+            => ReadAsync(buffer.AsMemory(offset, count)).AsTask().GetAwaiter().GetResult();
+
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    private sealed class FakeTime : TimeProvider
+    {
+        public DateTimeOffset Now { get; set; } = new(2026, 10, 3, 12, 0, 0, TimeSpan.Zero);
+
+        public override DateTimeOffset GetUtcNow() => Now;
     }
 }

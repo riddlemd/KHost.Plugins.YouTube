@@ -13,6 +13,11 @@ public class YouTubeMediaProvider : IMediaProvider
 {
     private const int MaxAllowedResults = 50;
 
+    /// <summary>A flat search is one request and a normal one takes seconds. yt-dlp's own socket
+    /// timeout and retries can add up to a minute on a bad link, so this waits that out and no more:
+    /// the host is staring at a spinner.</summary>
+    internal static readonly TimeSpan SearchTimeout = TimeSpan.FromSeconds(90);
+
     private readonly IPluginContext _plugin;
     private readonly IMediaAcquisitionService _media;
     private readonly ISingerQueueService _queue;
@@ -129,7 +134,8 @@ public class YouTubeMediaProvider : IMediaProvider
                     "--flat-playlist",
                     "--no-warnings",
                 ],
-                CancellationToken.None);
+                CancellationToken.None,
+                timeout: SearchTimeout);
         }
         catch (Exception ex)
         {
@@ -152,7 +158,11 @@ public class YouTubeMediaProvider : IMediaProvider
     /// stderr line is for the log, not the console.</summary>
     private static string DescribeSearchFailure(Exception ex) => ex switch
     {
-        KHostException { ReferenceCode: "KH-YOUTUBE-YTDLP-OUTDATED" } =>
+        YtDlpUnavailableException =>
+            "YouTube: search failed — yt-dlp is not installed and could not be downloaded. Check this computer is online.",
+        YtDlpTimeoutException =>
+            "YouTube: search failed — it took too long. Check your internet connection and try again.",
+        KHostException { ReferenceCode: YtDlpFailure.OutdatedCode } =>
             "YouTube: search failed — yt-dlp on this machine looks too old. Run 'yt-dlp -U' to update it.",
         FileNotFoundException =>
             "YouTube: search failed — yt-dlp was not found at its configured path. Check the yt-dlp Path setting.",
@@ -372,16 +382,29 @@ public class YouTubeMediaProvider : IMediaProvider
             }
             catch (Exception ex)
             {
-                // The message rather than the type: this is read on the Downloads page at a
-                // glance, and yt-dlp's own line is already the useful half of it.
-                await _media.FailImportAsync(ticket.MediaId, ex.Message);
-                throw;
+                // Not rethrown: the host would only log it generically, and this is where the
+                // YouTube wording lives. A cancel took the branch above and still propagates.
+                _logger.LogWarning(ex, "YouTube download of '{VideoId}' failed", entity.ForeignKey);
+
+                var reason = YtDlpFailure.Describe(ex);
+                var detail = YtDlpFailure.Detail(ex);
+
+                // The detail is for the Downloads page a host opens on purpose; the flash stays plain.
+                await _media.FailImportAsync(ticket.MediaId, detail is null ? reason : $"{reason} ({detail})");
+                _flash.Show($"YouTube: could not download '{request.Title}' — {reason}", FlashType.Warning);
+                return;
             }
 
             if (!File.Exists(destination))
             {
-                await _media.FailImportAsync(ticket.MediaId, "yt-dlp finished without producing a file");
-                throw new InvalidOperationException($"yt-dlp did not produce '{destination}': {output}");
+                _logger.LogWarning(
+                    "yt-dlp did not produce '{Destination}' for '{VideoId}': {Output}", destination, entity.ForeignKey, output);
+
+                const string reason = "yt-dlp finished without producing a file.";
+
+                await _media.FailImportAsync(ticket.MediaId, reason);
+                _flash.Show($"YouTube: could not download '{request.Title}' — {reason}", FlashType.Warning);
+                return;
             }
 
             await _media.CompleteImportAsync(ticket.MediaId);
