@@ -1,31 +1,39 @@
 # KHost.Plugins.YouTube
 
 YouTube media provider for [KHost](https://github.com/riddlemd/KHost). Adds a YouTube search provider to the console's
-Song Search panel, with an "Open on YouTube" result action.
+Song Search panel. **Enqueue** downloads the video into the library and queues it for the selected singer; its
+sub-action **Open on YouTube** opens the video in a browser.
 
 Searches run through [yt-dlp](https://github.com/yt-dlp/yt-dlp), so **there is no API key to
-get and nothing to configure**. The YouTube Data API was dropped for it: a key needs a Google
-Cloud project, and its free quota is 10,000 units a day against 100 units per search — about
-100 searches, which one karaoke night spends.
+get and nothing to configure**.
 
-Results carry the video title as `Title` and leave `Artist` empty — a video title is one
-string, and the channel is the uploader rather than the performer, so it stays in `Notes`.
+Each result shows the video's own title. The artist is a best-effort parse of that title; the
+channel (the uploader, not the performer) goes in `Notes` with the watch URL, and shows as
+"Published by".
+
+## Installing
+
+From a host: Plugins, then Available, install YouTube Search, and restart KHost. It is one
+portable build that runs on Windows, macOS and Linux.
+
+By hand: unzip the release into its own folder under KHost's `plugins/` directory, enable it on
+the Plugins page, and restart KHost. No key and no further setup; the plugin finds or fetches
+yt-dlp itself.
+
+yt-dlp merges separate video and audio streams with ffmpeg. This plugin does not locate, pass or
+download ffmpeg, so yt-dlp uses whatever it finds for itself (usually on `PATH`). If none is
+there, it falls back to a single pre-merged MP4 where YouTube offers one.
 
 ## Building
 
-The contracts come from the `KHost.Abstractions` and `KHost.Common` packages, so no checkout of
-KHost is needed to build:
+The contracts come from the `KHost.Abstractions` and `KHost.Common` packages (0.53.0). They are
+not on nuget.org: build them into a local feed with KHost's `./build/pack-contracts.sh`, then
+register it once with `dotnet nuget add source ~/.nuget/khost-local -n khost-local`.
 
 ```bash
 dotnet build KHost.Plugins.YouTube.slnx
 dotnet test tests/KHost.Plugins.YouTube.Tests
 ```
-
-## Installing
-
-Copy the build output (entry dll, `manifest.json`, and dependency dlls) into a folder under
-KHost's `plugins/` directory, enable it on KHost's Plugins settings page, and restart KHost.
-No key, and no further setup — the first search finds yt-dlp or fetches it.
 
 ## How yt-dlp is found
 
@@ -34,12 +42,13 @@ Three tiers, in order:
 1. **The `yt-dlp Path` setting**, if set. Wrong path is an error, not a reason to download a
    second copy behind your back.
 2. **`yt-dlp` on `PATH`** — whatever the machine already has.
-3. **A copy this plugin downloads**, into KHost's `cache/tools/`, from yt-dlp's latest release.
-   Windows (x64/arm64/x86), macOS (universal), and Linux (x64/arm64, glibc or musl) are all
+3. **A copy this plugin downloads**, into `cache/tools/` beside KHost, from yt-dlp's latest release,
+   checked against its published SHA-512 before it runs. Windows (x64/arm64/x86), macOS (universal), and Linux (x64/arm64, glibc or musl) are all
    covered; 32-bit ARM Linux ships as a zip and is unpacked.
 
-Tier 3 needs no action from the host, which is the point. But see the next section before
-relying on it.
+Tier 3 needs no action from the host. A downloaded copy is kept current by `yt-dlp -U` once per
+run (the **Keep the downloaded yt-dlp up to date** setting, on by default); a copy from tier 1 or 2
+is never updated by the plugin. See the next section before relying on tier 3.
 
 ## macOS: yt-dlp's own build is slow here — install it instead
 
@@ -71,11 +80,6 @@ Measured on an Apple silicon Mac, same yt-dlp version (2026.08.19), same machine
 The bundle's cost varies because the scan result is cached for a while and re-earned later — the
 cold numbers are what a host meets on a fresh session, which is the number that matters at the
 start of a night. The brew install was steady across every run.
-
-What it is not: ad-hoc `codesign` made no difference (20.9/22.1/21.7s), nor did forcing the arm64
-slice (22.1s; x86_64 under Rosetta was worse at 36.4s), nor `TMPDIR` (20.7s), nor where the file
-lives (23.8-26.8s across three locations). Reading the same 37MB off disk takes 0.00s, so it is
-not I/O, and no third-party antivirus was installed.
 
 After installing, either leave the `yt-dlp Path` setting blank and let `PATH` find it, or set it
 to the output of `which yt-dlp`.
