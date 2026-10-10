@@ -10,7 +10,7 @@
   "apiVersion": 1,
   "settings": [
     { "key": "maxResults", "type": "int", "section": "Search", "label": "Max Results", "default": 10 },
-    { "key": "ytDlpPath", "type": "string", "section": "yt-dlp", "label": "yt-dlp Path (optional — found or fetched if blank)" },
+    { "key": "ytDlpPath", "type": "string", "section": "yt-dlp", "label": "yt-dlp path", "optional": true, "description": "Found or fetched if blank." },
     { "key": "autoUpdate", "type": "bool", "section": "yt-dlp", "label": "Keep the downloaded yt-dlp up to date", "default": true }
   ]
 }

@@ -21,6 +21,8 @@ public class YouTubeMediaProviderTests : IDisposable
     private readonly IFlashService _flash = Substitute.For<IFlashService>();
     private readonly Guid _singerId = Guid.NewGuid();
     private readonly FakeRunner _runner = new() { Output = SearchOutput };
+    private readonly List<(string Path, string Title, string? Artist)> _tagged = [];
+    private Exception? _tagFailure;
     private readonly YouTubeMediaProvider _provider;
     private readonly string _mediaDirectory = Path.Combine(Path.GetTempPath(), $"khost-yt-tests-{Guid.NewGuid():N}");
 
@@ -34,7 +36,7 @@ public class YouTubeMediaProviderTests : IDisposable
         _queue.SelectedUserId.Returns(_singerId);
 
         _provider = new YouTubeMediaProvider(
-            _plugin, _library, _queue, _performances, NullLogger<YouTubeMediaProvider>.Instance, _flash, _runner.RunAsync);
+            _plugin, _library, _queue, _performances, NullLogger<YouTubeMediaProvider>.Instance, _flash, _runner.RunAsync, TagAsync);
     }
 
     public void Dispose()
@@ -955,6 +957,65 @@ public class YouTubeMediaProviderTests : IDisposable
     /// <summary>Computes the destination the same way production code does.</summary>
     private string TrackDestinationFor(MediaSearchEntity entity)
         => Path.Combine(_mediaDirectory, "youtube", $"{entity.ForeignKey}.mp4");
+
+    private Task TagAsync(string path, string title, string? artist, CancellationToken cancellationToken)
+    {
+        _tagged.Add((path, title, artist));
+        return _tagFailure is { } failure ? Task.FromException(failure) : Task.CompletedTask;
+    }
+
+    // ── writing the title and artist into the download ─────────────────────────────────
+
+    /// <summary>Tagged before the row is marked complete, with the library's title rather than the
+    /// raw video title, so a re-import of the folder reads back what the library shows.</summary>
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_Downloaded_TagsTheFileWithTheLibraryTitleBeforeCompleting()
+    {
+        var entity = BuildEntity("tag-happy", "Toto - Africa (Karaoke Version)", "Toto", TimeSpan.FromMinutes(3), "")
+            with { Fields = new Dictionary<string, string> { ["cleanTitle"] = "Africa" } };
+        var destination = TrackDestinationFor(entity);
+        var mediaId = Guid.NewGuid();
+        StubBegin(mediaId);
+        var order = new List<string>();
+        _runner.OnRun = _ => { order.Add("Run"); File.WriteAllBytes(destination, [1]); };
+        _library.When(l => l.CompleteImportAsync(mediaId)).Do(_ => order.Add(_tagged.Count == 1 ? "Complete after tag" : "Complete"));
+
+        await Enqueue(entity);
+
+        Assert.Equal([(destination, "Africa", "Toto")], _tagged);
+        Assert.Equal(["Run", "Complete after tag"], order);
+    }
+
+    /// <summary>The download is still a good song without its tags, so a tag failure is no reason
+    /// to fail the import the host is waiting on.</summary>
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_TaggingFails_StillCompletesTheImport()
+    {
+        var entity = BuildEntity("tag-fails", "Africa", "Toto", TimeSpan.FromMinutes(3), "");
+        var destination = TrackDestinationFor(entity);
+        var mediaId = Guid.NewGuid();
+        StubBegin(mediaId);
+        _runner.OnRun = _ => File.WriteAllBytes(destination, [1]);
+        _tagFailure = new InvalidOperationException("ffmpeg exited with 1");
+
+        await Enqueue(entity);
+
+        Assert.Single(_tagged);
+        await _library.Received(1).CompleteImportAsync(mediaId);
+        await _library.DidNotReceive().FailImportAsync(Arg.Any<Guid>(), Arg.Any<string?>());
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_DownloadFails_TagsNothing()
+    {
+        var entity = BuildEntity("tag-no-file", "Africa", "Toto", TimeSpan.FromMinutes(3), "");
+        StubBegin(Guid.NewGuid());
+        _runner.ThrowOnRun = new InvalidOperationException("yt-dlp exited with 1");
+
+        await Enqueue(entity);
+
+        Assert.Empty(_tagged);
+    }
 
     private sealed class FakeRunner
     {

@@ -26,6 +26,7 @@ public class YouTubeMediaProvider : IMediaProvider
     private readonly IFlashService _flash;
     private readonly YouTubeSettings _settings;
     private readonly YtDlpRunner _run;
+    private readonly Mp4Tagger? _tag;
 
     // A host on slow venue internet can click Enqueue twice before the first download finishes;
     // this stops a duplicate yt-dlp process, which BeginImportAsync's DB idempotency does not.
@@ -43,8 +44,9 @@ public class YouTubeMediaProvider : IMediaProvider
         ISingerQueueService queue,
         IPerformanceService performances,
         ILogger<YouTubeMediaProvider> logger,
-        IFlashService flash)
-        : this(plugin, media, queue, performances, logger, flash, BuildRunner(plugin))
+        IFlashService flash,
+        IFFmpegService ffmpeg)
+        : this(plugin, media, queue, performances, logger, flash, BuildRunner(plugin), Mp4Tags.Using(ffmpeg))
     {
     }
 
@@ -55,7 +57,8 @@ public class YouTubeMediaProvider : IMediaProvider
         IPerformanceService performances,
         ILogger<YouTubeMediaProvider> logger,
         IFlashService flash,
-        YtDlpRunner run)
+        YtDlpRunner run,
+        Mp4Tagger? tag = null)
     {
         _plugin = plugin;
         _media = media;
@@ -65,6 +68,7 @@ public class YouTubeMediaProvider : IMediaProvider
         _flash = flash;
         _settings = plugin.BindSettings<YouTubeSettings>();
         _run = run;
+        _tag = tag;
 
         Actions = [
             new() {
@@ -407,11 +411,37 @@ public class YouTubeMediaProvider : IMediaProvider
                 return;
             }
 
+            await TagAsync(destination, request, ticket.MediaId, entity.ForeignKey, directory, ticket.Cancellation);
+
             await _media.CompleteImportAsync(ticket.MediaId);
         }
         finally
         {
             _downloadsInFlight.TryRemove(entity.ForeignKey, out _);
+        }
+    }
+
+    /// <summary>A failed tag leaves the download as it came: playable, and the library row already
+    /// carries the title and artist. Only a re-import of the folder would miss them.</summary>
+    private async Task TagAsync(
+        string destination, MediaImportRequest request, Guid mediaId, string foreignKey, string directory,
+        CancellationToken cancellationToken)
+    {
+        if (_tag is null || string.IsNullOrWhiteSpace(request.Title))
+            return;
+
+        try
+        {
+            await _tag(destination, request.Title, request.Artist, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            await CleanUpAfterCancelAsync(directory, foreignKey, destination, mediaId);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not write the title and artist into the download of '{VideoId}'", foreignKey);
         }
     }
 
