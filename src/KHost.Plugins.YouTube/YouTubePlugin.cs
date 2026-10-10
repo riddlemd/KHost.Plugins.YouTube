@@ -1,11 +1,12 @@
 using KHost.Abstractions.Services;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace KHost.Plugins.YouTube;
 
 /// <summary>Settles yt-dlp before the first search rather than during it: resolving it may mean
 /// a 35MB download, and the host who triggers that should not be the one waiting mid-shift.</summary>
-public sealed class YouTubePlugin : IPlugin
+public sealed class YouTubePlugin : IPlugin<YouTubeSettings>
 {
     private const string SlowOnMacOs =
         "yt-dlp was downloaded rather than found on this machine. On macOS that build is rescanned "
@@ -16,22 +17,28 @@ public sealed class YouTubePlugin : IPlugin
     internal static readonly TimeSpan UpdateTimeout = TimeSpan.FromMinutes(5);
 
     private readonly ILogger<YouTubePlugin> _logger;
+    private readonly IOptionsMonitor<YouTubeSettings> _settings;
+    private readonly IHttpClientFactory _httpClientFactory;
 
     // Resolved from the host's container: the loader builds plugins with ActivatorUtilities, so a
     // constructor parameter the host can supply is simply handed over.
-    public YouTubePlugin(ILogger<YouTubePlugin> logger) => _logger = logger;
+    public YouTubePlugin(ILogger<YouTubePlugin> logger, IOptionsMonitor<YouTubeSettings> settings, IHttpClientFactory httpClientFactory)
+    {
+        _logger = logger;
+        _settings = settings;
+        _httpClientFactory = httpClientFactory;
+    }
 
     public Task InitializeAsync(IPluginContext context, CancellationToken cancellationToken = default)
     {
-        var settings = context.BindSettings<YouTubeSettings>();
-
-        var resolver = new YtDlpResolver(
-            settings.YtDlpPath,
-            Path.Combine(AppContext.BaseDirectory, "cache", "tools"));
+        var resolver = YtDlpResolver.WithLivePath(
+            () => _settings.CurrentValue.YtDlpPath,
+            Path.Combine(AppContext.BaseDirectory, "cache", "tools"),
+            _httpClientFactory);
 
         // Started, not awaited: a first run fetches 35MB, and startup is a window the host is
         // watching. Nothing else waits on this, since a search resolves yt-dlp for itself either way.
-        _ = Task.Run(() => PrepareAsync(resolver, settings, context, _logger), CancellationToken.None);
+        _ = Task.Run(() => PrepareAsync(resolver, () => _settings.CurrentValue, context, _logger), CancellationToken.None);
 
         return Task.CompletedTask;
     }
@@ -40,7 +47,7 @@ public sealed class YouTubePlugin : IPlugin
     // is the branch worth a test, and InitializeAsync only fires it on a task nothing can await.
     internal static async Task PrepareAsync(
         YtDlpResolver resolver,
-        YouTubeSettings settings,
+        Func<YouTubeSettings> settings,
         IPluginContext context,
         ILogger logger,
         TimeSpan? updateTimeout = null)
@@ -68,7 +75,8 @@ public sealed class YouTubePlugin : IPlugin
         if (OperatingSystem.IsMacOS())
             context.AddWarning(SlowOnMacOs);
 
-        if (!settings.AutoUpdate)
+        // Read here, after a possibly long download, so a save made meanwhile decides the update.
+        if (!settings().AutoUpdate)
             return;
 
         try

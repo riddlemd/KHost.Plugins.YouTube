@@ -3,6 +3,7 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 
 namespace KHost.Plugins.YouTube.Tests;
 
@@ -16,13 +17,103 @@ public class YouTubePluginTests : IDisposable
     public YouTubePluginTests() => Directory.CreateDirectory(_dir);
 
     [Fact]
+    public void YouTubePlugin_NamesItsSettingsClass_SoTheHostServesOptions()
+    {
+        Assert.True(typeof(IPlugin<YouTubeSettings>).IsAssignableFrom(typeof(YouTubePlugin)));
+    }
+
+    [Fact]
+    public async Task InitializeAsync_PathSavedAfterConstruction_IsTheOnePrepared()
+    {
+        var saved = Path.Combine(_dir, "saved-after-construction");
+        var monitor = Substitute.For<IOptionsMonitor<YouTubeSettings>>();
+        monitor.CurrentValue.Returns(new YouTubeSettings { YtDlpPath = Path.Combine(_dir, "at-construction") });
+        var plugin = new YouTubePlugin(NullLogger<YouTubePlugin>.Instance, monitor, Substitute.For<IHttpClientFactory>());
+
+        monitor.CurrentValue.Returns(new YouTubeSettings { YtDlpPath = saved });
+        await plugin.InitializeAsync(_context);
+
+        for (var i = 0; i < 100 && !_context.ReceivedCalls().Any(c => c.GetMethodInfo().Name == nameof(IPluginContext.AddWarning)); i++)
+            await Task.Delay(50);
+
+        _context.Received(1).AddWarning(Arg.Is<string>(m => m.Contains(saved)));
+    }
+
+    [Fact]
+    public async Task PrepareAsync_ReadsAutoUpdateOnlyAfterYtDlpIsResolved()
+    {
+        // A first run spends minutes downloading; a save made meanwhile must decide the update.
+        var toolsDir = Path.Combine(_dir, "tools");
+        Directory.CreateDirectory(toolsDir);
+        var owned = Path.Combine(toolsDir, YtDlpResolver.ExecutableName);
+        File.WriteAllText(owned, "");
+        List<string> order = [];
+        var resolver = YtDlpResolver.WithLivePath(() => { order.Add("resolve"); return owned; }, toolsDir, Substitute.For<IHttpClientFactory>());
+
+        await YouTubePlugin.PrepareAsync(
+            resolver, () => { order.Add("autoUpdate"); return new YouTubeSettings { AutoUpdate = false }; },
+            _context, NullLogger<YouTubePlugin>.Instance);
+
+        Assert.Equal(["resolve", "autoUpdate"], order);
+    }
+
+    [Fact]
+    public async Task PrepareAsync_AutoUpdateTurnedOnAfterwards_RunsTheUpdate()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var toolsDir = Path.Combine(_dir, "tools");
+        Directory.CreateDirectory(toolsDir);
+        var owned = Path.Combine(toolsDir, YtDlpResolver.ExecutableName);
+        var marker = Path.Combine(_dir, "ran");
+        File.WriteAllText(owned, $"#!/bin/sh\ntouch '{marker}'\n");
+        File.SetUnixFileMode(owned, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        var settings = new YouTubeSettings { AutoUpdate = false };
+        var resolver = new YtDlpResolver(owned, toolsDir);
+
+        await YouTubePlugin.PrepareAsync(resolver, () => settings, _context, NullLogger<YouTubePlugin>.Instance);
+        Assert.False(File.Exists(marker));
+
+        settings.AutoUpdate = true;
+        await YouTubePlugin.PrepareAsync(resolver, () => settings, _context, NullLogger<YouTubePlugin>.Instance);
+
+        Assert.True(File.Exists(marker));
+    }
+
+    [Fact]
+    public async Task InitializeAsync_ReadsSettingsOnTheBackgroundTask_NotWhileStarting()
+    {
+        // A read taken during startup would be a copy; this one blocks, so a capture would hang it.
+        using var gate = new ManualResetEventSlim();
+        var missing = Path.Combine(_dir, "no-such-yt-dlp");
+        var monitor = Substitute.For<IOptionsMonitor<YouTubeSettings>>();
+        monitor.CurrentValue.Returns(_ =>
+        {
+            gate.Wait(TimeSpan.FromSeconds(10));
+            return new YouTubeSettings { YtDlpPath = missing };
+        });
+        var plugin = new YouTubePlugin(NullLogger<YouTubePlugin>.Instance, monitor, Substitute.For<IHttpClientFactory>());
+
+        var init = Task.Run(() => plugin.InitializeAsync(_context));
+        var returned = await Task.WhenAny(init, Task.Delay(TimeSpan.FromSeconds(3))) == init;
+        gate.Set();
+
+        Assert.True(returned);
+
+        for (var i = 0; i < 100 && !_context.ReceivedCalls().Any(c => c.GetMethodInfo().Name == nameof(IPluginContext.AddWarning)); i++)
+            await Task.Delay(50);
+
+        _context.Received(1).AddWarning(Arg.Is<string>(m => m.Contains(missing)));
+    }
+
+    [Fact]
     public async Task PrepareAsync_YtDlpCannotBeResolved_WarnsItCouldNotBePrepared()
     {
         // A configured path that does not exist is an error the resolver raises rather than quietly
         // downloading over, and the plugin turns it into a line the host can act on.
         var resolver = new YtDlpResolver(configuredPath: Path.Combine(_dir, "missing"), toolsDirectory: _dir);
 
-        await YouTubePlugin.PrepareAsync(resolver, new YouTubeSettings(), _context, NullLogger<YouTubePlugin>.Instance);
+        await YouTubePlugin.PrepareAsync(resolver, () => new YouTubeSettings(), _context, NullLogger<YouTubePlugin>.Instance);
 
         _context.Received(1).AddWarning(Arg.Is<string>(m => m.Contains("could not be prepared")));
     }
@@ -36,7 +127,7 @@ public class YouTubePluginTests : IDisposable
         File.WriteAllText(provided, "");
         var resolver = new YtDlpResolver(configuredPath: provided, toolsDirectory: Path.Combine(_dir, "tools"));
 
-        await YouTubePlugin.PrepareAsync(resolver, new YouTubeSettings(), _context, NullLogger<YouTubePlugin>.Instance);
+        await YouTubePlugin.PrepareAsync(resolver, () => new YouTubeSettings(), _context, NullLogger<YouTubePlugin>.Instance);
 
         _context.DidNotReceiveWithAnyArgs().AddWarning(default!);
     }
@@ -53,7 +144,7 @@ public class YouTubePluginTests : IDisposable
         var resolver = new YtDlpResolver(configuredPath: owned, toolsDirectory: toolsDir);
 
         await YouTubePlugin.PrepareAsync(
-            resolver, new YouTubeSettings { AutoUpdate = false }, _context, NullLogger<YouTubePlugin>.Instance);
+            resolver, () => new YouTubeSettings { AutoUpdate = false }, _context, NullLogger<YouTubePlugin>.Instance);
 
         if (OperatingSystem.IsMacOS())
             _context.Received(1).AddWarning(Arg.Is<string>(m => m.Contains("brew install yt-dlp")));
@@ -65,9 +156,9 @@ public class YouTubePluginTests : IDisposable
     public async Task PrepareAsync_TheDownloadCannotConnect_WarnsInPlainWordsWithoutTheExceptionText()
     {
         var resolver = new YtDlpResolver(
-            null, Path.Combine(_dir, "tools"), pathVariable: "", handler: new FakeHandler(throws: true));
+            null, Path.Combine(_dir, "tools"), pathVariable: "", httpClientFactory: new StubHttpClientFactory(new FakeHandler(throws: true)));
 
-        await YouTubePlugin.PrepareAsync(resolver, new YouTubeSettings(), _context, NullLogger<YouTubePlugin>.Instance);
+        await YouTubePlugin.PrepareAsync(resolver, () => new YouTubeSettings(), _context, NullLogger<YouTubePlugin>.Instance);
 
         _context.Received(1).AddWarning(
             "yt-dlp could not be downloaded — no internet connection. YouTube search will not work until it is.");
@@ -78,9 +169,9 @@ public class YouTubePluginTests : IDisposable
     {
         // A tampered download is not an offline problem, so it must not be worded as one.
         var resolver = new YtDlpResolver(
-            null, Path.Combine(_dir, "tools"), pathVariable: "", handler: new FakeHandler(corruptSums: true));
+            null, Path.Combine(_dir, "tools"), pathVariable: "", httpClientFactory: new StubHttpClientFactory(new FakeHandler(corruptSums: true)));
 
-        await YouTubePlugin.PrepareAsync(resolver, new YouTubeSettings(), _context, NullLogger<YouTubePlugin>.Instance);
+        await YouTubePlugin.PrepareAsync(resolver, () => new YouTubeSettings(), _context, NullLogger<YouTubePlugin>.Instance);
 
         _context.Received(1).AddWarning("yt-dlp could not be prepared. The log has the reason.");
     }
@@ -91,7 +182,7 @@ public class YouTubePluginTests : IDisposable
         var missing = Path.Combine(_dir, "missing");
         var resolver = new YtDlpResolver(configuredPath: missing, toolsDirectory: _dir);
 
-        await YouTubePlugin.PrepareAsync(resolver, new YouTubeSettings(), _context, NullLogger<YouTubePlugin>.Instance);
+        await YouTubePlugin.PrepareAsync(resolver, () => new YouTubeSettings(), _context, NullLogger<YouTubePlugin>.Instance);
 
         _context.Received(1).AddWarning(Arg.Is<string>(m => m.StartsWith("yt-dlp could not be prepared:") && m.Contains(missing)));
     }
@@ -103,7 +194,7 @@ public class YouTubePluginTests : IDisposable
 
         var resolver = OwnedScript("echo 'ERROR: Unable to download API page: Failed to establish a new connection' >&2; exit 1");
 
-        await YouTubePlugin.PrepareAsync(resolver, new YouTubeSettings(), _context, NullLogger<YouTubePlugin>.Instance);
+        await YouTubePlugin.PrepareAsync(resolver, () => new YouTubeSettings(), _context, NullLogger<YouTubePlugin>.Instance);
 
         _context.Received(1).AddWarning(
             "yt-dlp could not check for updates — no internet connection; the installed copy is still used.");
@@ -116,7 +207,7 @@ public class YouTubePluginTests : IDisposable
 
         var resolver = OwnedScript("echo 'ERROR: disk exploded' >&2; exit 1");
 
-        await YouTubePlugin.PrepareAsync(resolver, new YouTubeSettings(), _context, NullLogger<YouTubePlugin>.Instance);
+        await YouTubePlugin.PrepareAsync(resolver, () => new YouTubeSettings(), _context, NullLogger<YouTubePlugin>.Instance);
 
         _context.Received(1).AddWarning(
             "yt-dlp could not check for updates; the installed copy is still used. The log has the reason.");
@@ -130,7 +221,7 @@ public class YouTubePluginTests : IDisposable
         var resolver = OwnedScript("sleep 30");
 
         await YouTubePlugin.PrepareAsync(
-            resolver, new YouTubeSettings(), _context, NullLogger<YouTubePlugin>.Instance,
+            resolver, () => new YouTubeSettings(), _context, NullLogger<YouTubePlugin>.Instance,
             updateTimeout: TimeSpan.FromMilliseconds(400));
 
         _context.Received(1).AddWarning(
@@ -144,7 +235,7 @@ public class YouTubePluginTests : IDisposable
 
         var resolver = OwnedScript("echo up to date");
 
-        await YouTubePlugin.PrepareAsync(resolver, new YouTubeSettings(), _context, NullLogger<YouTubePlugin>.Instance);
+        await YouTubePlugin.PrepareAsync(resolver, () => new YouTubeSettings(), _context, NullLogger<YouTubePlugin>.Instance);
 
         _context.DidNotReceive().AddWarning(Arg.Is<string>(m => m.Contains("update")));
     }

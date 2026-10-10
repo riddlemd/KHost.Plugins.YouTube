@@ -3,6 +3,7 @@ using KHost.Abstractions.Exceptions;
 using KHost.Abstractions.Models;
 using KHost.Abstractions.Services;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 
 namespace KHost.Plugins.YouTube.Tests;
 
@@ -14,7 +15,7 @@ public class YouTubeMediaProviderTests : IDisposable
         {"id":"def456","title":"Wonderwall Karaoke","channel":"Sing King","duration":null}
         """;
 
-    private readonly IPluginContext _plugin = Substitute.For<IPluginContext>();
+    private readonly IOptionsMonitor<YouTubeSettings> _settings = Substitute.For<IOptionsMonitor<YouTubeSettings>>();
     private readonly IMediaAcquisitionService _library = Substitute.For<IMediaAcquisitionService>();
     private readonly ISingerQueueService _queue = Substitute.For<ISingerQueueService>();
     private readonly IPerformanceService _performances = Substitute.For<IPerformanceService>();
@@ -28,7 +29,7 @@ public class YouTubeMediaProviderTests : IDisposable
 
     public YouTubeMediaProviderTests()
     {
-        _plugin.BindSettings<YouTubeSettings>().Returns(new YouTubeSettings { MaxResults = 10 });
+        _settings.CurrentValue.Returns(new YouTubeSettings { MaxResults = 10 });
         _library.MediaDirectory.Returns(_mediaDirectory);
 
         // Enqueuing is composed from the queue and performances now, so without a selected singer
@@ -36,7 +37,7 @@ public class YouTubeMediaProviderTests : IDisposable
         _queue.SelectedUserId.Returns(_singerId);
 
         _provider = new YouTubeMediaProvider(
-            _plugin, _library, _queue, _performances, NullLogger<YouTubeMediaProvider>.Instance, _flash, _runner.RunAsync, TagAsync);
+            _settings, _library, _queue, _performances, NullLogger<YouTubeMediaProvider>.Instance, _flash, _runner.RunAsync, TagAsync);
     }
 
     public void Dispose()
@@ -263,6 +264,40 @@ public class YouTubeMediaProviderTests : IDisposable
         await _provider.SearchAsync("africa", pageSize: 5);
 
         Assert.Equal("ytsearch5:africa Karaoke", _runner.Calls.Single()[0]);
+    }
+
+    [Fact]
+    public async Task SearchAsync_MaxResultsSavedAfterConstruction_AppliesToTheNextSearch()
+    {
+        _settings.CurrentValue.Returns(new YouTubeSettings { MaxResults = 7 });
+
+        await _provider.SearchAsync("africa");
+
+        Assert.Equal("ytsearch7:africa Karaoke", _runner.Calls.Single()[0]);
+    }
+
+    [Fact]
+    public async Task SearchAsync_YtDlpPathSavedAfterConstruction_IsTheOneRun()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var script = Path.Combine(_mediaDirectory, "fake-yt-dlp");
+        Directory.CreateDirectory(_mediaDirectory);
+        File.WriteAllText(script, "#!/bin/sh\necho '{\"id\":\"live1\",\"title\":\"Live\",\"channel\":\"C\",\"duration\":60}'\n");
+        File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+        var settings = new YouTubeSettings { YtDlpPath = Path.Combine(_mediaDirectory, "not-there") };
+        var plugin = Substitute.For<IOptionsMonitor<YouTubeSettings>>();
+        plugin.CurrentValue.Returns(_ => settings);
+        var provider = new YouTubeMediaProvider(
+            plugin, _library, _queue, _performances, NullLogger<YouTubeMediaProvider>.Instance, _flash,
+            Substitute.For<IFFmpegService>(), Substitute.For<IHttpClientFactory>());
+
+        Assert.Empty(await provider.SearchAsync("africa"));
+
+        settings = new YouTubeSettings { YtDlpPath = script };
+
+        Assert.Equal("live1", Assert.Single(await provider.SearchAsync("africa")).ForeignKey);
     }
 
     [Fact]
@@ -1016,6 +1051,229 @@ public class YouTubeMediaProviderTests : IDisposable
 
         Assert.Empty(_tagged);
     }
+
+    // ── ephemeral downloads and fetching a row's file again ────────────────────────────
+
+    [Fact]
+    public void Ephemeral_DefaultsToOff()
+        => Assert.False(new YouTubeSettings().Ephemeral);
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_Request_CarriesTheVideoIdAsSourceKeyAndIsNotEphemeralByDefault()
+    {
+        var entity = BuildEntity("eph-off", "Africa", "Toto", null, "");
+        StubBegin(Guid.NewGuid());
+        _runner.OnRun = _ => File.WriteAllBytes(TrackDestinationFor(entity), [1]);
+
+        await Enqueue(entity);
+
+        await _library.Received(1).BeginImportAsync(Arg.Is<MediaImportRequest>(r =>
+            r.SourceKey == "eph-off" && !r.IsEphemeral && !r.IsSingleUse));
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_EphemeralSettingOn_MarksTheRequestEphemeral()
+    {
+        var provider = BuildProvider(new YouTubeSettings { Ephemeral = true });
+        var entity = BuildEntity("eph-on", "Africa", "Toto", null, "");
+        StubBegin(Guid.NewGuid());
+        _runner.OnRun = _ => File.WriteAllBytes(TrackDestinationFor(entity), [1]);
+
+        await provider.Actions.Single().PerformAsync(entity);
+
+        await _library.Received(1).BeginImportAsync(Arg.Is<MediaImportRequest>(r =>
+            r.SourceKey == "eph-on" && r.IsEphemeral));
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_EphemeralSavedAfterConstruction_MarksTheNextRequest()
+    {
+        var settings = new YouTubeSettings();
+        var plugin = Substitute.For<IOptionsMonitor<YouTubeSettings>>();
+        plugin.CurrentValue.Returns(_ => settings);
+        var provider = new YouTubeMediaProvider(
+            plugin, _library, _queue, _performances, NullLogger<YouTubeMediaProvider>.Instance, _flash, _runner.RunAsync, TagAsync);
+        var entity = BuildEntity("eph-live", "Africa", "Toto", null, "");
+        StubBegin(Guid.NewGuid());
+        _runner.OnRun = _ => File.WriteAllBytes(TrackDestinationFor(entity), [1]);
+
+        settings = new YouTubeSettings { Ephemeral = true };
+        await provider.Actions.Single().PerformAsync(entity);
+
+        await _library.Received(1).BeginImportAsync(Arg.Is<MediaImportRequest>(r =>
+            r.SourceKey == "eph-live" && r.IsEphemeral));
+    }
+
+    [Fact]
+    public async Task DownloadAndEnqueueAsync_EphemeralSettingOn_MarksTheAlreadyDownloadedImportToo()
+    {
+        var provider = BuildProvider(new YouTubeSettings { Ephemeral = true });
+        var entity = BuildEntity("eph-cached", "Africa", "Toto", null, "");
+        Directory.CreateDirectory(Path.GetDirectoryName(TrackDestinationFor(entity))!);
+        File.WriteAllBytes(TrackDestinationFor(entity), [1]);
+
+        await provider.Actions.Single().PerformAsync(entity);
+
+        await _library.Received(1).ImportAsync(Arg.Is<MediaImportRequest>(r =>
+            r.SourceKey == "eph-cached" && r.IsEphemeral));
+    }
+
+    [Theory]
+    [InlineData("YouTube", "abc123", true)]
+    [InlineData("youtube", "abc123", true)]
+    [InlineData("Spotify", "abc123", false)]
+    [InlineData("YouTube", "", false)]
+    [InlineData("YouTube", "  ", false)]
+    public void CanRefetch_AnswersFromTheRowsSourceAndKey(string source, string sourceKey, bool expected)
+        => Assert.Equal(expected, _provider.CanRefetch(BuildMedia("x", source, sourceKey)));
+
+    [Fact]
+    public async Task RefetchAsync_RunsYtDlpForTheKeyIntoTheRowsPath_TagsCompletesAndEnqueuesNothing()
+    {
+        var media = BuildMedia("refetch-ok", "YouTube", "refetch-ok", title: "Africa", artist: "Toto");
+        var mediaId = Guid.NewGuid();
+
+        _runner.OnRun = _ => File.WriteAllBytes(media.FilePath, [1]);
+
+        await _provider.RefetchAsync(media, new ImportTicket { MediaId = mediaId, Cancellation = default });
+
+        var arguments = _runner.Calls.Single();
+        Assert.Equal("https://www.youtube.com/watch?v=refetch-ok", arguments[0]);
+        Assert.Equal(media.FilePath, arguments[arguments.ToList().IndexOf("-o") + 1]);
+        Assert.Equal([(media.FilePath, "Africa", "Toto")], _tagged);
+
+        await _library.Received(1).CompleteImportAsync(mediaId);
+        await _library.DidNotReceive().BeginImportAsync(Arg.Any<MediaImportRequest>());
+        await _performances.DidNotReceive().CreateAndEnqueueAsync(Arg.Any<Performance>());
+    }
+
+    [Fact]
+    public async Task RefetchAsync_ReportsProgressAgainstTheTicketsRow()
+    {
+        var media = BuildMedia("refetch-progress", "YouTube", "refetch-progress");
+        var mediaId = Guid.NewGuid();
+        _runner.LinesToStream = ["[download]  50.0% of 10.00MiB at 1.00MiB/s ETA 00:05"];
+        _runner.OnRun = _ => File.WriteAllBytes(media.FilePath, [1]);
+
+        await _provider.RefetchAsync(media, new ImportTicket { MediaId = mediaId, Cancellation = default });
+
+        await _library.Received().ReportDownloadProgressAsync(mediaId, Arg.Any<double>());
+    }
+
+    [Fact]
+    public async Task RefetchAsync_YtDlpFails_FailsTheImportWithTheYouTubeReason()
+    {
+        var media = BuildMedia("refetch-fail", "YouTube", "refetch-fail");
+        var mediaId = Guid.NewGuid();
+        _runner.ThrowOnRun = new InvalidOperationException("yt-dlp exited with 1: ERROR: Video unavailable");
+
+        await _provider.RefetchAsync(media, new ImportTicket { MediaId = mediaId, Cancellation = default });
+
+        await _library.Received(1).FailImportAsync(mediaId, "yt-dlp could not fetch it. (Video unavailable)");
+        await _library.DidNotReceive().CompleteImportAsync(Arg.Any<Guid>());
+        Assert.Empty(_tagged);
+    }
+
+    [Fact]
+    public async Task RefetchAsync_YtDlpProducesNoFile_FailsTheImport()
+    {
+        var media = BuildMedia("refetch-nofile", "YouTube", "refetch-nofile");
+        var mediaId = Guid.NewGuid();
+
+        await _provider.RefetchAsync(media, new ImportTicket { MediaId = mediaId, Cancellation = default });
+
+        await _library.Received(1).FailImportAsync(mediaId, "yt-dlp finished without producing a file.");
+        await _library.DidNotReceive().CompleteImportAsync(Arg.Any<Guid>());
+    }
+
+    [Fact]
+    public async Task RefetchAsync_Cancelled_CleansUpAndDiscardsWithoutThrowing()
+    {
+        var media = BuildMedia("refetch-cancel", "YouTube", "refetch-cancel");
+        var mediaId = Guid.NewGuid();
+        Directory.CreateDirectory(Path.GetDirectoryName(media.FilePath)!);
+        var leftover = media.FilePath + ".part";
+        File.WriteAllBytes(leftover, [1]);
+        _runner.ThrowOnRun = new OperationCanceledException();
+
+        await _provider.RefetchAsync(media, new ImportTicket { MediaId = mediaId, Cancellation = default });
+
+        Assert.False(File.Exists(leftover));
+        await _library.Received(1).DiscardImportAsync(mediaId);
+        await _library.DidNotReceive().FailImportAsync(Arg.Any<Guid>(), Arg.Any<string?>());
+        await _library.DidNotReceive().CompleteImportAsync(Arg.Any<Guid>());
+    }
+
+    [Fact]
+    public async Task RefetchAsync_PassesTheTicketsCancellationTokenToTheRunner()
+    {
+        var media = BuildMedia("refetch-token", "YouTube", "refetch-token");
+        using var cts = new CancellationTokenSource();
+        _runner.OnRun = _ => File.WriteAllBytes(media.FilePath, [1]);
+
+        await _provider.RefetchAsync(media, new ImportTicket { MediaId = Guid.NewGuid(), Cancellation = cts.Token });
+
+        Assert.Equal(cts.Token, _runner.LastToken);
+    }
+
+    [Fact]
+    public async Task RefetchAsync_SameVideoAlreadyDownloading_StartsNoSecondYtDlp()
+    {
+        var media = BuildMedia("refetch-dup", "YouTube", "refetch-dup");
+        var ticket = new ImportTicket { MediaId = Guid.NewGuid(), Cancellation = default };
+        _runner.Gate = new TaskCompletionSource<string>();
+
+        var first = _provider.RefetchAsync(media, ticket);
+        await _provider.RefetchAsync(media, ticket);
+
+        Assert.Single(_runner.Calls);
+
+        _runner.Gate.SetResult("");
+        await first;
+
+        // The guard is released once the first settles, so a later refetch runs again.
+        _runner.Gate = null;
+        await _provider.RefetchAsync(media, ticket);
+        Assert.Equal(2, _runner.Calls.Count);
+    }
+
+    [Fact]
+    public async Task RefetchAsync_WhileEnqueueOfTheSameVideoIsDownloading_StartsNoSecondYtDlp()
+    {
+        var entity = BuildEntity("refetch-vs-enqueue", "Song", "", null, "");
+        var media = BuildMedia("refetch-vs-enqueue", "YouTube", "refetch-vs-enqueue");
+        StubBegin(Guid.NewGuid());
+        _runner.Gate = new TaskCompletionSource<string>();
+
+        var enqueue = Enqueue(entity);
+        await _provider.RefetchAsync(media, new ImportTicket { MediaId = Guid.NewGuid(), Cancellation = default });
+
+        Assert.Single(_runner.Calls);
+
+        _runner.Gate.SetResult("");
+        await enqueue;
+    }
+
+    private YouTubeMediaProvider BuildProvider(YouTubeSettings settings)
+    {
+        var plugin = Substitute.For<IOptionsMonitor<YouTubeSettings>>();
+        plugin.CurrentValue.Returns(settings);
+
+        return new YouTubeMediaProvider(
+            plugin, _library, _queue, _performances, NullLogger<YouTubeMediaProvider>.Instance, _flash, _runner.RunAsync, TagAsync);
+    }
+
+    private Media BuildMedia(
+        string fileName, string source, string sourceKey, string title = "Song", string artist = "")
+        => new()
+        {
+            FilePath = Path.Combine(_mediaDirectory, "youtube", $"{fileName}.mp4"),
+            Title = title,
+            Artist = artist,
+            Source = source,
+            SourceKey = sourceKey,
+            Status = MediaStatus.Downloading,
+        };
 
     private sealed class FakeRunner
     {

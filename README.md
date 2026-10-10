@@ -26,7 +26,7 @@ there, it falls back to a single pre-merged MP4 where YouTube offers one.
 
 ## Building
 
-The contracts come from the `KHost.Abstractions` and `KHost.Common` packages (0.53.0). They are
+The contracts come from the `KHost.Abstractions` and `KHost.Common` packages (0.57.0). They are
 not on nuget.org: build them into a local feed with KHost's `./build/pack-contracts.sh`, then
 register it once with `dotnet nuget add source ~/.nuget/khost-local -n khost-local`.
 
@@ -34,6 +34,22 @@ register it once with `dotnet nuget add source ~/.nuget/khost-local -n khost-loc
 dotnet build KHost.Plugins.YouTube.slnx
 dotnet test tests/KHost.Plugins.YouTube.Tests
 ```
+
+## Settings
+
+| Setting | Default | |
+|---|---|---|
+| Max Results | 10 | Search results per query. |
+| yt-dlp path | blank | See below. |
+| Keep the downloaded yt-dlp up to date | on | See below. |
+| Ephemeral downloads | off | Each downloaded video file is deleted when KHost closes. The song stays in the library and is downloaded again the next time it is queued. |
+
+Settings reach the plugin as `IOptionsMonitor<YouTubeSettings>`, so a saved change applies
+without restarting KHost: the next search or download uses it. The startup yt-dlp update check
+is the exception, as it runs once per launch.
+
+With **Ephemeral downloads** on, a queued song whose file is gone waits for a fresh download, so
+it needs the network again at that point.
 
 ## How yt-dlp is found
 

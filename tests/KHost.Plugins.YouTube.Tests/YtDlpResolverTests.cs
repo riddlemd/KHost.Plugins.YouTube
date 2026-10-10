@@ -12,6 +12,7 @@ public class YtDlpResolverTests : IDisposable
 
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"ytdlp-resolver-{Guid.NewGuid():n}");
     private readonly FakeDownloadHandler _handler = new() { Body = Payload };
+    private readonly StubHttpClientFactory _factory;
 
     private string ToolsDirectory => Path.Combine(_root, "tools");
 
@@ -23,9 +24,13 @@ public class YtDlpResolverTests : IDisposable
         string? asset = null,
         TimeSpan? stallTimeout = null,
         TimeProvider? time = null)
-        => new(configuredPath, ToolsDirectory, pathVariable, _handler, asset, stallTimeout, time);
+        => new(configuredPath, ToolsDirectory, pathVariable, _factory, asset, stallTimeout, time);
 
-    public YtDlpResolverTests() => Directory.CreateDirectory(_root);
+    public YtDlpResolverTests()
+    {
+        _factory = new StubHttpClientFactory(_handler);
+        Directory.CreateDirectory(_root);
+    }
 
     public void Dispose()
     {
@@ -44,6 +49,23 @@ public class YtDlpResolverTests : IDisposable
 
         Assert.Equal(configured, resolved);
         Assert.Empty(_handler.Requests);
+    }
+
+    [Fact]
+    public async Task ResolveAsync_ConfiguredPathChangedAfterConstruction_UsesTheNewOne()
+    {
+        var first = Path.Combine(_root, "first");
+        var second = Path.Combine(_root, "second");
+        await File.WriteAllTextAsync(first, Payload);
+        await File.WriteAllTextAsync(second, Payload);
+        var current = first;
+        var resolver = YtDlpResolver.WithLivePath(() => current, ToolsDirectory, _factory);
+
+        Assert.Equal(first, await resolver.ResolveAsync());
+
+        current = second;
+
+        Assert.Equal(second, await resolver.ResolveAsync());
     }
 
     [Fact]
@@ -87,6 +109,28 @@ public class YtDlpResolverTests : IDisposable
         Assert.Equal(2, _handler.Requests.Count);
         Assert.Contains(_handler.Requests, r => r.Contains(YtDlpResolver.AssetName, StringComparison.Ordinal));
         Assert.Contains(_handler.Requests, r => r.Contains("SHA2-512SUMS", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ResolveAsync_DownloadsThroughTheFactorysNamedClient()
+    {
+        await Resolver().ResolveAsync();
+
+        // Asset and checksum both reach the stub through the factory's client: a bare HttpClient
+        // would skip the host's resilience handler.
+        Assert.Equal(["yt-dlp-download"], _factory.Names);
+        Assert.Equal(2, _handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task ResolveAsync_BodyIsStreamedToDiskRatherThanBufferedWithTheHeaders()
+    {
+        _handler.StagingPathProbe = Path.Combine(ToolsDirectory, YtDlpResolver.AssetName + ".downloading");
+
+        await Resolver().ResolveAsync();
+
+        // Buffered, the whole body is read inside GetAsync, before the staging file exists.
+        Assert.True(_handler.StagingExistedAtFirstBodyRead);
     }
 
     [Fact]
@@ -383,6 +427,11 @@ public class YtDlpResolverTests : IDisposable
         /// <summary>The asset downloads fine but the checksum fetch never answers.</summary>
         public bool StallSums { get; set; }
 
+        /// <summary>When set, the asset body reports whether this file existed as its first byte was read.</summary>
+        public string? StagingPathProbe { get; set; }
+
+        public bool StagingExistedAtFirstBodyRead { get; private set; }
+
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             Requests.Add(request.RequestUri!.AbsoluteUri);
@@ -397,7 +446,10 @@ public class YtDlpResolverTests : IDisposable
             if (isSums)
                 return BuildSumsResponse();
 
-            HttpContent content = StallBody ? new StreamContent(new StallingStream())
+            HttpContent content = StagingPathProbe is not null
+                ? new StreamContent(new ProbingStream(
+                    Encoding.UTF8.GetBytes(Body ?? ""), () => StagingExistedAtFirstBodyRead = File.Exists(StagingPathProbe)))
+                : StallBody ? new StreamContent(new StallingStream())
                 : FailMidStream ? new StreamContent(new TruncatingStream())
                 : ZipEntries is not null ? new ByteArrayContent(BuildZip(ZipEntries))
                 : new StringContent(Body ?? "");
@@ -438,6 +490,42 @@ public class YtDlpResolverTests : IDisposable
 
             return buffer.ToArray();
         }
+    }
+
+    /// <summary>Serves a fixed body and reports once, as the first read arrives.</summary>
+    private sealed class ProbingStream(byte[] body, Action onFirstRead) : Stream
+    {
+        private int _position;
+        private bool _probed;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => body.Length;
+        public override long Position { get => _position; set => throw new NotSupportedException(); }
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (!_probed)
+            {
+                _probed = true;
+                onFirstRead();
+            }
+
+            var count = Math.Min(buffer.Length, body.Length - _position);
+            body.AsMemory(_position, count).CopyTo(buffer);
+            _position += count;
+
+            return ValueTask.FromResult(count);
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+            => ReadAsync(buffer.AsMemory(offset, count)).AsTask().GetAwaiter().GetResult();
+
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     /// <summary>Hands over a few bytes, then drops: a download interrupted, not one refused.</summary>

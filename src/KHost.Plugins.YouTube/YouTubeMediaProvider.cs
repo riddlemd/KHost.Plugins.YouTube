@@ -2,6 +2,7 @@ using KHost.Abstractions.Exceptions;
 using KHost.Abstractions.Models;
 using KHost.Abstractions.Services;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
@@ -9,7 +10,7 @@ using System.Text.Json;
 
 namespace KHost.Plugins.YouTube;
 
-public class YouTubeMediaProvider : IMediaProvider
+public class YouTubeMediaProvider : IMediaProvider, IMediaRefetcher
 {
     private const int MaxAllowedResults = 50;
 
@@ -18,15 +19,17 @@ public class YouTubeMediaProvider : IMediaProvider
     /// the host is staring at a spinner.</summary>
     internal static readonly TimeSpan SearchTimeout = TimeSpan.FromSeconds(90);
 
-    private readonly IPluginContext _plugin;
+    private readonly IOptionsMonitor<YouTubeSettings> _settings;
     private readonly IMediaAcquisitionService _media;
     private readonly ISingerQueueService _queue;
     private readonly IPerformanceService _performances;
     private readonly ILogger<YouTubeMediaProvider> _logger;
     private readonly IFlashService _flash;
-    private readonly YouTubeSettings _settings;
     private readonly YtDlpRunner _run;
     private readonly Mp4Tagger? _tag;
+
+    // Read per use: a save made while the host runs must reach the next search and download.
+    private YouTubeSettings Settings => _settings.CurrentValue;
 
     // A host on slow venue internet can click Enqueue twice before the first download finishes;
     // this stops a duplicate yt-dlp process, which BeginImportAsync's DB idempotency does not.
@@ -39,19 +42,20 @@ public class YouTubeMediaProvider : IMediaProvider
     // Every parameter past the context comes from the host's own container: the loader builds
     // providers with ActivatorUtilities, so there is no facade to go through for them.
     public YouTubeMediaProvider(
-        IPluginContext plugin,
+        IOptionsMonitor<YouTubeSettings> settings,
         IMediaAcquisitionService media,
         ISingerQueueService queue,
         IPerformanceService performances,
         ILogger<YouTubeMediaProvider> logger,
         IFlashService flash,
-        IFFmpegService ffmpeg)
-        : this(plugin, media, queue, performances, logger, flash, BuildRunner(plugin), Mp4Tags.Using(ffmpeg))
+        IFFmpegService ffmpeg,
+        IHttpClientFactory httpClientFactory)
+        : this(settings, media, queue, performances, logger, flash, BuildRunner(settings, httpClientFactory), Mp4Tags.Using(ffmpeg))
     {
     }
 
     public YouTubeMediaProvider(
-        IPluginContext plugin,
+        IOptionsMonitor<YouTubeSettings> settings,
         IMediaAcquisitionService media,
         ISingerQueueService queue,
         IPerformanceService performances,
@@ -60,13 +64,12 @@ public class YouTubeMediaProvider : IMediaProvider
         YtDlpRunner run,
         Mp4Tagger? tag = null)
     {
-        _plugin = plugin;
+        _settings = settings;
         _media = media;
         _queue = queue;
         _performances = performances;
         _logger = logger;
         _flash = flash;
-        _settings = plugin.BindSettings<YouTubeSettings>();
         _run = run;
         _tag = tag;
 
@@ -123,7 +126,7 @@ public class YouTubeMediaProvider : IMediaProvider
         if (pageNumber > 1)
             return [];
 
-        var count = Math.Clamp(pageSize > 0 ? pageSize : _settings.MaxResults, 1, MaxAllowedResults);
+        var count = Math.Clamp(pageSize > 0 ? pageSize : Settings.MaxResults, 1, MaxAllowedResults);
 
         string output;
 
@@ -274,13 +277,12 @@ public class YouTubeMediaProvider : IMediaProvider
                 : null;
     }
 
-    private static YtDlpRunner BuildRunner(IPluginContext plugin)
+    private static YtDlpRunner BuildRunner(IOptionsMonitor<YouTubeSettings> settings, IHttpClientFactory httpClientFactory)
     {
-        var settings = plugin.BindSettings<YouTubeSettings>();
-
-        var resolver = new YtDlpResolver(
-            settings.YtDlpPath,
-            Path.Combine(AppContext.BaseDirectory, "cache", "tools"));
+        var resolver = YtDlpResolver.WithLivePath(
+            () => settings.CurrentValue.YtDlpPath,
+            Path.Combine(AppContext.BaseDirectory, "cache", "tools"),
+            httpClientFactory);
 
         return new YtDlp(resolver).RunAsync;
     }
@@ -329,6 +331,8 @@ public class YouTubeMediaProvider : IMediaProvider
             Duration = entity.Duration,
             Notes = entity.Notes,
             Source = DisplayName,
+            SourceKey = entity.ForeignKey,
+            IsEphemeral = Settings.Ephemeral,
         };
 
         // A re-click must not re-fetch a video already sitting in the library's cache.
@@ -349,71 +353,7 @@ public class YouTubeMediaProvider : IMediaProvider
             var ticket = await _media.BeginImportAsync(request);
             await EnqueueForSelectedSingerAsync(ticket.MediaId);
 
-            var destinationsSeen = 0;
-            void OnLine(string line)
-            {
-                double? fraction;
-                (destinationsSeen, fraction) = YtDlpProgressParser.Parse(destinationsSeen, line);
-
-                if (fraction is { } value)
-                    _ = ReportProgressSafelyAsync(ticket.MediaId, value);
-            }
-
-            string output;
-            try
-            {
-                output = await _run(
-                    [
-                        $"https://www.youtube.com/watch?v={entity.ForeignKey}",
-                        "-f",
-                        "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
-                        "--merge-output-format",
-                        "mp4",
-                        "-o",
-                        destination,
-                        "--no-warnings",
-                        // Without it yt-dlp rewrites its progress line in place with carriage
-                        // returns, so line-by-line streaming never sees an update.
-                        "--newline",
-                    ],
-                    ticket.Cancellation,
-                    OnLine);
-            }
-            catch (OperationCanceledException)
-            {
-                await CleanUpAfterCancelAsync(directory, entity.ForeignKey, destination, ticket.MediaId);
-                throw;
-            }
-            catch (Exception ex)
-            {
-                // Not rethrown: the host would only log it generically, and this is where the
-                // YouTube wording lives. A cancel took the branch above and still propagates.
-                _logger.LogWarning(ex, "YouTube download of '{VideoId}' failed", entity.ForeignKey);
-
-                var reason = YtDlpFailure.Describe(ex);
-                var detail = YtDlpFailure.Detail(ex);
-
-                // The detail is for the Downloads page a host opens on purpose; the flash stays plain.
-                await _media.FailImportAsync(ticket.MediaId, detail is null ? reason : $"{reason} ({detail})");
-                _flash.Show($"YouTube: could not download '{request.Title}' — {reason}", FlashType.Warning);
-                return;
-            }
-
-            if (!File.Exists(destination))
-            {
-                _logger.LogWarning(
-                    "yt-dlp did not produce '{Destination}' for '{VideoId}': {Output}", destination, entity.ForeignKey, output);
-
-                const string reason = "yt-dlp finished without producing a file.";
-
-                await _media.FailImportAsync(ticket.MediaId, reason);
-                _flash.Show($"YouTube: could not download '{request.Title}' — {reason}", FlashType.Warning);
-                return;
-            }
-
-            await TagAsync(destination, request, ticket.MediaId, entity.ForeignKey, directory, ticket.Cancellation);
-
-            await _media.CompleteImportAsync(ticket.MediaId);
+            await DownloadAsync(entity.ForeignKey, destination, request.Title, request.Artist, ticket);
         }
         finally
         {
@@ -421,18 +361,118 @@ public class YouTubeMediaProvider : IMediaProvider
         }
     }
 
-    /// <summary>A failed tag leaves the download as it came: playable, and the library row already
-    /// carries the title and artist. Only a re-import of the folder would miss them.</summary>
-    private async Task TagAsync(
-        string destination, MediaImportRequest request, Guid mediaId, string foreignKey, string directory,
-        CancellationToken cancellationToken)
+    public bool CanRefetch(Media media)
+        => string.Equals(media.Source, DisplayName, StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrWhiteSpace(media.SourceKey);
+
+    public async Task RefetchAsync(Media media, ImportTicket ticket)
     {
-        if (_tag is null || string.IsNullOrWhiteSpace(request.Title))
+        // The host opened the Downloads entry for the first fetch's row; a second yt-dlp would
+        // race it for the same file, and that fetch settles the row.
+        if (!_downloadsInFlight.TryAdd(media.SourceKey, 0))
             return;
 
         try
         {
-            await _tag(destination, request.Title, request.Artist, cancellationToken);
+            Directory.CreateDirectory(Path.GetDirectoryName(media.FilePath)!);
+
+            await DownloadAsync(media.SourceKey, media.FilePath, media.Title, media.Artist, ticket);
+        }
+        catch (OperationCanceledException)
+        {
+            // Already cleaned up and discarded; the host treats a throw as a failed fetch.
+        }
+        finally
+        {
+            _downloadsInFlight.TryRemove(media.SourceKey, out _);
+        }
+    }
+
+    /// <summary>Everything after BeginImportAsync: runs yt-dlp into <paramref name="destination"/>,
+    /// tags it, and settles the ticket exactly once. A cancel is cleaned up, discarded and rethrown.</summary>
+    private async Task DownloadAsync(string videoId, string destination, string title, string? artist, ImportTicket ticket)
+    {
+        var directory = Path.GetDirectoryName(destination)!;
+
+        var destinationsSeen = 0;
+        void OnLine(string line)
+        {
+            double? fraction;
+            (destinationsSeen, fraction) = YtDlpProgressParser.Parse(destinationsSeen, line);
+
+            if (fraction is { } value)
+                _ = ReportProgressSafelyAsync(ticket.MediaId, value);
+        }
+
+        string output;
+        try
+        {
+            output = await _run(
+                [
+                    $"https://www.youtube.com/watch?v={videoId}",
+                    "-f",
+                    "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
+                    "--merge-output-format",
+                    "mp4",
+                    "-o",
+                    destination,
+                    "--no-warnings",
+                    // Without it yt-dlp rewrites its progress line in place with carriage
+                    // returns, so line-by-line streaming never sees an update.
+                    "--newline",
+                ],
+                ticket.Cancellation,
+                OnLine);
+        }
+        catch (OperationCanceledException)
+        {
+            await CleanUpAfterCancelAsync(directory, videoId, destination, ticket.MediaId);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Not rethrown: the host would only log it generically, and this is where the
+            // YouTube wording lives. A cancel took the branch above and still propagates.
+            _logger.LogWarning(ex, "YouTube download of '{VideoId}' failed", videoId);
+
+            var reason = YtDlpFailure.Describe(ex);
+            var detail = YtDlpFailure.Detail(ex);
+
+            // The detail is for the Downloads page a host opens on purpose; the flash stays plain.
+            await _media.FailImportAsync(ticket.MediaId, detail is null ? reason : $"{reason} ({detail})");
+            _flash.Show($"YouTube: could not download '{title}' — {reason}", FlashType.Warning);
+            return;
+        }
+
+        if (!File.Exists(destination))
+        {
+            _logger.LogWarning(
+                "yt-dlp did not produce '{Destination}' for '{VideoId}': {Output}", destination, videoId, output);
+
+            const string reason = "yt-dlp finished without producing a file.";
+
+            await _media.FailImportAsync(ticket.MediaId, reason);
+            _flash.Show($"YouTube: could not download '{title}' — {reason}", FlashType.Warning);
+            return;
+        }
+
+        await TagAsync(destination, title, artist, ticket.MediaId, videoId, directory, ticket.Cancellation);
+
+        await _media.CompleteImportAsync(ticket.MediaId);
+    }
+
+    /// <summary>A failed tag leaves the download as it came: playable, and the library row already
+    /// carries the title and artist. Only a re-import of the folder would miss them.</summary>
+    private async Task TagAsync(
+        string destination, string title, string? artist, Guid mediaId, string foreignKey, string directory,
+        CancellationToken cancellationToken)
+    {
+        if (_tag is null || string.IsNullOrWhiteSpace(title))
+            return;
+
+        try
+        {
+            await _tag(destination, title, artist, cancellationToken);
         }
         catch (OperationCanceledException)
         {

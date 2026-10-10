@@ -2,15 +2,16 @@
   "$schema": "https://raw.githubusercontent.com/riddlemd/KHost/main/src/KHost.Abstractions/Models/Plugins/manifest.schema.json",
   "id": "88f42c92-f15a-443c-afa0-0983f05fdbb4",
   "name": "YouTube Search",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "KHost",
   "description": "Search YouTube for karaoke videos.",
   "icon": "search",
   "entryAssembly": "KHost.Plugins.YouTube.dll",
-  "apiVersion": 1,
+  "apiVersion": 6,
   "settings": [
     { "key": "maxResults", "type": "int", "section": "Search", "label": "Max Results", "default": 10 },
     { "key": "ytDlpPath", "type": "string", "section": "yt-dlp", "label": "yt-dlp path", "optional": true, "description": "Found or fetched if blank." },
-    { "key": "autoUpdate", "type": "bool", "section": "yt-dlp", "label": "Keep the downloaded yt-dlp up to date", "default": true }
+    { "key": "autoUpdate", "type": "bool", "section": "yt-dlp", "label": "Keep the downloaded yt-dlp up to date", "default": true },
+    { "key": "ephemeral", "type": "bool", "section": "Downloads", "label": "Ephemeral downloads", "default": false, "description": "The video file is deleted when KHost closes, and downloaded again the next time the song is queued." }
   ]
 }

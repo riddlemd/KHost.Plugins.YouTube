@@ -153,7 +153,7 @@ public class YtDlpTests : IDisposable
     [Fact]
     public async Task RunAsync_NoYtDlpAndTheFetchFails_ThrowsUnavailableCarryingTheCause()
     {
-        var resolver = new YtDlpResolver(null, _root, pathVariable: "", handler: new ThrowingHandler());
+        var resolver = new YtDlpResolver(null, _root, pathVariable: "", httpClientFactory: new StubHttpClientFactory(new ThrowingHandler()));
 
         var ex = await Assert.ThrowsAsync<YtDlpUnavailableException>(() => new YtDlp(resolver).RunAsync(["--version"]));
 
@@ -163,7 +163,7 @@ public class YtDlpTests : IDisposable
     [Fact]
     public async Task RunAsync_FetchStillBackedOff_ThrowsUnavailableWithTheOriginalCauseNotAWrapperOfIt()
     {
-        var resolver = new YtDlpResolver(null, _root, pathVariable: "", handler: new ThrowingHandler());
+        var resolver = new YtDlpResolver(null, _root, pathVariable: "", httpClientFactory: new StubHttpClientFactory(new ThrowingHandler()));
         var ytDlp = new YtDlp(resolver);
         await Assert.ThrowsAsync<YtDlpUnavailableException>(() => ytDlp.RunAsync(["--version"]));
 
@@ -175,7 +175,7 @@ public class YtDlpTests : IDisposable
     [Fact]
     public async Task RunAsync_CancelledWhileFetchingYtDlp_StaysACancelRatherThanBecomingUnavailable()
     {
-        var resolver = new YtDlpResolver(null, _root, pathVariable: "", handler: new HangingHandler());
+        var resolver = new YtDlpResolver(null, _root, pathVariable: "", httpClientFactory: new StubHttpClientFactory(new HangingHandler()));
         using var cts = new CancellationTokenSource();
 
         var run = new YtDlp(resolver).RunAsync(["--version"], cts.Token);

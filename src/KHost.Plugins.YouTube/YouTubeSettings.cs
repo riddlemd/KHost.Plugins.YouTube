@@ -12,4 +12,8 @@ public class YouTubeSettings
     /// <summary>Keeps the copy this plugin downloaded current, once per run in the background. No
     /// effect on a brew/apt/winget yt-dlp: it refuses <c>-U</c>, its manager updates it.</summary>
     public bool AutoUpdate { get; set; } = true;
+
+    /// <summary>Marks every download ephemeral: the host deletes the file when it closes and asks
+    /// this plugin to fetch it again when the song is next queued.</summary>
+    public bool Ephemeral { get; set; }
 }

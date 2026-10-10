@@ -35,6 +35,16 @@ public class ManifestTests
             Assert.True(properties.Contains(setting.Key), $"Manifest setting '{setting.Key}' binds to nothing.");
     }
 
+    [Fact]
+    public void Manifest_DeclaresEphemeralAsAnOffByDefaultCheckbox_AndItsDefaultMatchesTheSettingsClass()
+    {
+        var setting = Read().Settings.Single(s => s.Key == "ephemeral");
+
+        Assert.Equal(PluginSettingType.Bool, setting.Type);
+        Assert.False(setting.Default!.Value.GetBoolean());
+        Assert.False(new YouTubeSettings().Ephemeral);
+    }
+
     private static PluginManifest Read()
         => JsonSerializer.Deserialize<PluginManifest>(File.ReadAllText(ManifestPath), JsonSerializerOptions.Web)!;
 }

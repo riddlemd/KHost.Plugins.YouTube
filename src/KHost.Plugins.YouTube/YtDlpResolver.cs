@@ -10,6 +10,7 @@ namespace KHost.Plugins.YouTube;
 public sealed class YtDlpResolver
 {
     private const string LatestAssetUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download";
+    internal const string HttpClientName = "yt-dlp-download";
     private const string SumsUrl = LatestAssetUrl + "/SHA2-512SUMS";
 
     /// <summary>After a failed fetch, how long searches leave it alone: every search resolves yt-dlp,
@@ -25,10 +26,10 @@ public sealed class YtDlpResolver
     // back-off one of them cannot see would not stop the other retrying.
     private static readonly ConcurrentDictionary<string, (DateTimeOffset At, Exception Cause)> Failures = new();
 
-    private readonly string? _configuredPath;
+    private readonly Func<string?> _configuredPath;
     private readonly string _toolsDirectory;
     private readonly string? _pathVariable;
-    private readonly HttpMessageHandler? _handler;
+    private readonly IHttpClientFactory? _httpClientFactory;
     private readonly string _asset;
     private readonly TimeSpan _stallTimeout;
     private readonly TimeProvider _time;
@@ -39,7 +40,26 @@ public sealed class YtDlpResolver
         string? configuredPath,
         string toolsDirectory,
         string? pathVariable = null,
-        HttpMessageHandler? handler = null,
+        IHttpClientFactory? httpClientFactory = null,
+        string? asset = null,
+        TimeSpan? stallTimeout = null,
+        TimeProvider? time = null)
+        : this(() => configuredPath, toolsDirectory, pathVariable, httpClientFactory, asset, stallTimeout, time)
+    {
+    }
+
+    /// <summary>A resolver that asks for the configured path on every resolve, so a saved path
+    /// setting applies to the next search. A separate factory: a second public constructor makes
+    /// a null path ambiguous.</summary>
+    public static YtDlpResolver WithLivePath(
+        Func<string?> configuredPath, string toolsDirectory, IHttpClientFactory httpClientFactory)
+        => new(configuredPath, toolsDirectory, httpClientFactory: httpClientFactory);
+
+    private YtDlpResolver(
+        Func<string?> configuredPath,
+        string toolsDirectory,
+        string? pathVariable = null,
+        IHttpClientFactory? httpClientFactory = null,
         string? asset = null,
         TimeSpan? stallTimeout = null,
         TimeProvider? time = null)
@@ -47,7 +67,7 @@ public sealed class YtDlpResolver
         _configuredPath = configuredPath;
         _toolsDirectory = toolsDirectory;
         _pathVariable = pathVariable ?? Environment.GetEnvironmentVariable("PATH");
-        _handler = handler;
+        _httpClientFactory = httpClientFactory;
         _asset = asset ?? AssetName;
         _stallTimeout = stallTimeout ?? DefaultStallTimeout;
         _time = time ?? TimeProvider.System;
@@ -114,15 +134,17 @@ public sealed class YtDlpResolver
 
     public async Task<string> ResolveAsync(CancellationToken cancellationToken = default)
     {
-        if (!string.IsNullOrWhiteSpace(_configuredPath))
+        var configuredPath = _configuredPath();
+
+        if (!string.IsNullOrWhiteSpace(configuredPath))
         {
             // A configured path that is wrong is a mistake to report. Quietly downloading a second
             // copy would leave the host tuning a binary that is not the one being run.
-            if (!File.Exists(_configuredPath))
+            if (!File.Exists(configuredPath))
                 throw new FileNotFoundException(
-                    $"yt-dlp is not at the configured path '{_configuredPath}'.", _configuredPath);
+                    $"yt-dlp is not at the configured path '{configuredPath}'.", configuredPath);
 
-            return _configuredPath;
+            return configuredPath;
         }
 
         return FindOnPath() ?? await DownloadAsync(cancellationToken);
@@ -182,9 +204,10 @@ public sealed class YtDlpResolver
         // is perfectly happy with, and every later run would reuse it without ever retrying.
         var staging = Path.Combine(_toolsDirectory, asset + ".downloading");
 
-        using var http = _handler is null
-            ? new HttpClient()
-            : new HttpClient(_handler, disposeHandler: false);
+        // The factory's resilience handler bounds only the headers here: the body is streamed below
+        // under the per-read stall limit, so a 35MB download is not cut at the handler's total timeout.
+        using var http = (_httpClientFactory
+            ?? throw new InvalidOperationException("Fetching yt-dlp needs an IHttpClientFactory.")).CreateClient(HttpClientName);
 
         try
         {
